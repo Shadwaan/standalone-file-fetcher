@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Fetcher</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 24px;
+        }
+        .container {
+            max-width: 720px;
+            margin: 0 auto;
+        }
+        h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 4px;
+            color: #fff;
+        }
+        .subtitle {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 24px;
+        }
+
+        /* Sync Button */
+        .sync-btn {
+            width: 100%;
+            padding: 14px 24px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #1db954;
+            color: #fff;
+        }
+        .sync-btn:hover { background: #1ed760; }
+        .sync-btn:active { transform: scale(0.98); }
+        .sync-btn:disabled {
+            background: #333;
+            color: #666;
+            cursor: not-allowed;
+        }
+        .sync-btn.running {
+            background: #333;
+            color: #999;
+        }
+
+        /* Status Card */
+        .card {
+            background: #141420;
+            border: 1px solid #222;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 16px;
+        }
+        .card-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 10px;
+        }
+
+        /* Progress */
+        .progress-bar {
+            height: 4px;
+            background: #222;
+            border-radius: 2px;
+            margin: 8px 0;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: #1db954;
+            border-radius: 2px;
+            transition: width 0.3s;
+            width: 0%;
+        }
+        .progress-fill.error { background: #e74c3c; }
+
+        .status-message {
+            font-size: 14px;
+            color: #ccc;
+            margin-bottom: 6px;
+        }
+        .status-phase {
+            font-size: 12px;
+            color: #666;
+        }
+
+        /* Stats Grid */
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .stat {
+            text-align: center;
+            padding: 8px;
+            background: #1a1a28;
+            border-radius: 6px;
+        }
+        .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+        }
+        .stat-label {
+            font-size: 11px;
+            color: #666;
+            margin-top: 2px;
+        }
+
+        /* Playlist List */
+        .playlist-list {
+            list-style: none;
+        }
+        .playlist-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #1a1a28;
+        }
+        .playlist-item:last-child { border-bottom: none; }
+        .playlist-name {
+            font-size: 14px;
+            color: #e0e0e0;
+        }
+        .playlist-name .prefix {
+            color: #1db954;
+            font-weight: 600;
+        }
+        .playlist-meta {
+            font-size: 12px;
+            color: #666;
+        }
+        .badge {
+            font-size: 11px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 6px;
+        }
+        .badge-new { background: #1db95433; color: #1db954; }
+        .badge-removed { background: #e74c3c33; color: #e74c3c; }
+
+        /* Last sync */
+        .last-sync {
+            font-size: 12px;
+            color: #555;
+            margin-top: 12px;
+            text-align: center;
+        }
+
+        /* Errors */
+        .error-list {
+            list-style: none;
+            margin-top: 8px;
+        }
+        .error-item {
+            font-size: 12px;
+            color: #e74c3c;
+            padding: 4px 0;
+        }
+
+        /* Config */
+        .config-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            font-size: 13px;
+        }
+        .config-label { color: #666; }
+        .config-value { color: #aaa; font-family: monospace; font-size: 12px; }
+
+        /* Animations */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .running .status-message { animation: pulse 1.5s infinite; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>File Fetcher</h1>
+        <p class="subtitle">Spotify &rarr; Rekordbox + Traktor</p>
+
+        <button class="sync-btn" id="syncBtn" onclick="startSync()">Sync</button>
+
+        <div class="card" id="statusCard" style="display:none">
+            <div class="card-title">Status</div>
+            <div class="status-message" id="statusMessage">Ready</div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="status-phase" id="statusPhase"></div>
+
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value" id="statDownloaded">0</div>
+                    <div class="stat-label">Downloaded</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="statImported">0</div>
+                    <div class="stat-label">Imported</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="statSkipped">0</div>
+                    <div class="stat-label">Skipped</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="statFailed">0</div>
+                    <div class="stat-label">Failed</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" id="playlistCard" style="display:none">
+            <div class="card-title">Playlists</div>
+            <ul class="playlist-list" id="playlistList"></ul>
+        </div>
+
+        <div class="card" id="errorCard" style="display:none">
+            <div class="card-title">Errors</div>
+            <ul class="error-list" id="errorList"></ul>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Config</div>
+            <div id="configSection"></div>
+        </div>
+
+        <div class="last-sync" id="lastSync"></div>
+    </div>
+
+    <script>
+        let pollInterval = null;
+
+        async function startSync() {
+            const btn = document.getElementById('syncBtn');
+            btn.disabled = true;
+            btn.classList.add('running');
+            btn.textContent = 'Syncing...';
+
+            document.getElementById('statusCard').style.display = 'block';
+            document.getElementById('statusCard').classList.add('running');
+
+            try {
+                await fetch('/api/sync', { method: 'POST' });
+                // Poll for status
+                if (pollInterval) clearInterval(pollInterval);
+                pollInterval = setInterval(pollStatus, 1000);
+            } catch (e) {
+                btn.disabled = false;
+                btn.classList.remove('running');
+                btn.textContent = 'Sync';
+                document.getElementById('statusMessage').textContent = 'Error: ' + e.message;
+            }
+        }
+
+        async function pollStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                updateUI(data);
+
+                if (data.status === 'done' || data.status === 'error' || data.status === 'idle') {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+
+                    const btn = document.getElementById('syncBtn');
+                    btn.disabled = false;
+                    btn.classList.remove('running');
+                    btn.textContent = 'Sync';
+                    document.getElementById('statusCard').classList.remove('running');
+                }
+            } catch (e) {
+                // Ignore transient errors
+            }
+        }
+
+        function updateUI(data) {
+            document.getElementById('statusCard').style.display = 'block';
+            document.getElementById('statusMessage').textContent = data.message || data.status;
+            document.getElementById('statusPhase').textContent = data.phase || '';
+
+            // Stats
+            document.getElementById('statDownloaded').textContent = data.tracks_downloaded || 0;
+            document.getElementById('statImported').textContent = data.tracks_imported || 0;
+            document.getElementById('statSkipped').textContent = data.tracks_skipped || 0;
+            document.getElementById('statFailed').textContent = data.tracks_failed || 0;
+
+            // Progress bar
+            const total = data.tracks_total || 1;
+            const done = (data.tracks_imported || 0) + (data.tracks_skipped || 0) + (data.tracks_failed || 0);
+            const pct = data.status === 'done' ? 100 : Math.min(100, (done / total) * 100);
+            const fill = document.getElementById('progressFill');
+            fill.style.width = pct + '%';
+            fill.classList.toggle('error', data.status === 'error');
+
+            // Playlists
+            const playlists = data.playlist_details || [];
+            const plCard = document.getElementById('playlistCard');
+            const plList = document.getElementById('playlistList');
+            if (playlists.length > 0) {
+                plCard.style.display = 'block';
+                plList.innerHTML = playlists.map(pl => `
+                    <li class="playlist-item">
+                        <span class="playlist-name">
+                            <span class="prefix">FF</span> ${pl.display_name}
+                        </span>
+                        <span class="playlist-meta">
+                            ${pl.total} tracks
+                            ${pl.new > 0 ? `<span class="badge badge-new">+${pl.new} new</span>` : ''}
+                            ${pl.removed > 0 ? `<span class="badge badge-removed">-${pl.removed}</span>` : ''}
+                        </span>
+                    </li>
+                `).join('');
+            }
+
+            // Errors
+            const errors = data.errors || [];
+            const errCard = document.getElementById('errorCard');
+            const errList = document.getElementById('errorList');
+            if (errors.length > 0) {
+                errCard.style.display = 'block';
+                errList.innerHTML = errors.map(e => `<li class="error-item">${e}</li>`).join('');
+            } else {
+                errCard.style.display = 'none';
+            }
+
+            // Last sync
+            if (data.last_sync) {
+                const d = new Date(data.last_sync);
+                document.getElementById('lastSync').textContent =
+                    'Last sync: ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+            }
+        }
+
+        // Load config on page load
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                const cfg = await res.json();
+                const section = document.getElementById('configSection');
+                section.innerHTML = `
+                    <div class="config-row">
+                        <span class="config-label">Prefix</span>
+                        <span class="config-value">${cfg.playlist_prefix}</span>
+                    </div>
+                    <div class="config-row">
+                        <span class="config-label">Music Folder</span>
+                        <span class="config-value">${cfg.music_folder}</span>
+                    </div>
+                    <div class="config-row">
+                        <span class="config-label">Rekordbox DB</span>
+                        <span class="config-value">${cfg.rekordbox_db ? 'Connected' : 'Not set'}</span>
+                    </div>
+                    <div class="config-row">
+                        <span class="config-label">Traktor NML</span>
+                        <span class="config-value">${cfg.traktor_nml ? 'Connected' : 'Not set'}</span>
+                    </div>
+                `;
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        // Load last status on page load
+        async function loadStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                if (data.last_sync) {
+                    updateUI(data);
+                }
+                if (data.status === 'running') {
+                    const btn = document.getElementById('syncBtn');
+                    btn.disabled = true;
+                    btn.classList.add('running');
+                    btn.textContent = 'Syncing...';
+                    pollInterval = setInterval(pollStatus, 1000);
+                }
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        loadConfig();
+        loadStatus();
+    </script>
+</body>
+</html>
