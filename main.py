@@ -102,6 +102,46 @@ async def get_config():
     }
 
 
+@app.get("/api/usb/drives")
+async def get_usb_drives():
+    """Detect connected USB drives."""
+    from services.usb_detect import detect_usb_drives
+    return {"drives": detect_usb_drives()}
+
+
+_usb_export_task = None
+
+
+@app.post("/api/usb/export")
+async def start_usb_export(drive_letter: str = None):
+    """Start USB export (runs in background)."""
+    global _usb_export_task
+
+    if not drive_letter:
+        # Auto-select first USB drive
+        from services.usb_detect import detect_usb_drives
+        drives = detect_usb_drives()
+        if not drives:
+            return JSONResponse({"error": "No USB drive detected"}, status_code=400)
+        drive_letter = drives[0]["letter"]
+
+    from services.usb_export import export_to_usb, get_progress as usb_progress
+    if usb_progress()["status"] == "running":
+        return JSONResponse({"error": "USB export already in progress"}, status_code=409)
+
+    loop = asyncio.get_event_loop()
+    _usb_export_task = loop.run_in_executor(None, export_to_usb, drive_letter)
+
+    return {"status": "started", "drive": drive_letter}
+
+
+@app.get("/api/usb/status")
+async def get_usb_status():
+    """Get USB export progress."""
+    from services.usb_export import get_progress as usb_progress
+    return usb_progress()
+
+
 @app.get("/api/health")
 async def health():
     """Health check."""
