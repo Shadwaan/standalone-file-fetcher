@@ -190,3 +190,29 @@ pip install -r requirements.txt
 python main.py
 # Open http://localhost:8899, click Sync
 ```
+
+---
+
+## Next Phase: USB Export (NOT YET BUILT)
+
+### Goal
+After sync + analysis, auto-export FF playlists to USB pen drive for CDJ hardware. Support both Device Library Plus (`exportLibrary.db`) and legacy (`export.pdb`) formats. Keep USB in sync with local Rekordbox library.
+
+### Approach
+Automate Rekordbox's own "Export to Device" function via GUI automation (pywinauto/pyautogui). Rekordbox natively writes both Device Library Plus and legacy formats — don't reinvent this.
+
+### Flow
+1. Sync downloads + imports tracks (existing pipeline)
+2. WAL flush (existing)
+3. Rekordbox opens → analyzes unanalyzed tracks (existing)
+4. **Poll DB until `Analysed=0` count reaches zero** (analysis complete)
+5. For each FF playlist: right-click → "Export to Device" → select USB drive
+6. Rekordbox writes Device Library Plus + legacy PDB + ANLZ files to USB
+
+### Key Considerations
+- Must detect USB drives (see FM's `usb_exporter.py` `detect_removable_drives()` for reference)
+- Must wait for analysis to complete before exporting (poll `Analysed=0` count)
+- Rekordbox's export dialog needs GUI automation to select the target drive
+- Should only export playlists that changed since last export (track export state)
+- The FM codebase at `D:/Code/DJ/DJ File Manager/backend/services/usb_exporter.py` has reference code for USB detection, ANLZ writing, Rekordbox XML, and Traktor NML — but we should prefer Rekordbox's native export for Device Library Plus support
+- UI: add "Export to USB" button alongside Sync, or chain it automatically after Sync

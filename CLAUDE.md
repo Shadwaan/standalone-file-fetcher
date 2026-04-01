@@ -265,3 +265,13 @@ python main.py
 ```
 pip install fastapi uvicorn spotipy yt-dlp mutagen librosa numpy pyrekordbox python-dotenv requests psutil pyautogui pygetwindow pywinauto
 ```
+
+---
+
+## Next Phase: USB Export (NOT YET BUILT)
+
+Automate Rekordbox's "Export to Device" via GUI automation to export FF playlists to USB with Device Library Plus + legacy PDB support. See PRD.md "Next Phase" section for full spec.
+
+Reference code: `D:/Code/DJ/DJ File Manager/backend/services/usb_exporter.py` has USB drive detection, ANLZ writing, Rekordbox XML export, and Traktor NML export. But prefer Rekordbox's native export for Device Library Plus format — automate the GUI rather than writing the DB format ourselves.
+
+Key: must poll `Analysed=0` count to wait for Rekordbox analysis to finish before triggering export.
