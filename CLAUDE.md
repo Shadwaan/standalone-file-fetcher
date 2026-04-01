@@ -19,7 +19,32 @@ Extracted from DJ File Manager (FM) and DJ File Fetcher codebases into a single 
 
 The `analyzer.py` file exists but is NOT used in the sync pipeline. It's kept for reference only.
 
-**Rekordbox has NO auto-analyze on startup** and NO CLI for analysis. The only way to trigger analysis is through the GUI (select tracks → right-click → Analyse Track). We automate this with pywinauto + pyautogui.
+**Rekordbox has NO auto-analyze on startup and NO CLI for analysis.** The only way to trigger analysis is through the GUI (select tracks → right-click → Analyse Track). We automate this with pywinauto + pyautogui in `rekordbox_auto.py`.
+
+---
+
+## File Organization
+
+Downloads are organized into playlist subfolders:
+```
+D:/Music Backup/Incoming/
+├── Opening/
+│   ├── Jo Paciello - Fantasy.mp3
+│   └── ...
+├── Progressive/
+│   ├── Chris Luno - Yes Baby.mp3
+│   └── ...
+├── Oldies/
+│   ├── Paul Johnson - Get Get Down.mp3
+│   └── ...
+└── Half moon/
+    ├── Supernova - Phantascope.mp3
+    └── ...
+```
+
+The playlist subfolder name matches the display name (prefix stripped: "FF Opening" → "Opening").
+Rekordbox FolderPath stores the full path including the subfolder.
+Duplicate detection scans all subfolders recursively via the file index.
 
 ---
 
@@ -61,7 +86,7 @@ db.session.commit()
 db.session.close()
 db.engine.dispose()
 ```
-**Without this, all your imports are invisible to Rekordbox.**
+**Without this, all your imports are invisible to Rekordbox.** This was the cause of playlists showing 0 tracks.
 
 ### 5. Do NOT create new DjmdArtist or DjmdAlbum rows
 Creating new artist/album rows requires explicit IDs and crashes the session on flush.
@@ -114,12 +139,20 @@ content.ArtistID = artist_obj.ID
 ```
 
 ### 10. NEVER write to master.db while Rekordbox is running
-Check process list before sync. Rekordbox locks the DB and our WAL writes become invisible or corrupt:
+Check process list before sync:
 ```python
 import psutil
 for proc in psutil.process_iter(['name']):
     if 'rekordbox' in proc.info['name'].lower():
         raise RuntimeError("Close Rekordbox before syncing")
+```
+
+### 11. Import with Analysed=0 — NEVER use librosa
+Rekordbox analysis is superior. Import tracks as unanalyzed and let Rekordbox handle BPM/key/beatgrid:
+```python
+content.Analysed = 0  # Rekordbox will analyze
+# Do NOT write ANLZ files
+# Do NOT set BPM or KeyID
 ```
 
 ---
@@ -128,7 +161,7 @@ for proc in psutil.process_iter(['name']):
 
 ### DjmdContent Creation (Unanalyzed Import)
 - Set `.ID` = random 9-digit string (verify unique)
-- Set `.FolderPath` = forward-slash normalized path
+- Set `.FolderPath` = forward-slash normalized path (including playlist subfolder)
 - Set `.Title`, `.FileNameL`, `.FileSize`
 - Set `.FileType` = 1, `.BitRate` = 320, `.SampleRate` = 44100
 - Set `.Analysed` = 0 (Rekordbox will analyze)
@@ -152,12 +185,13 @@ db.engine.dispose()
 - All playlist/song rows need explicit `.ID` (random 9-10 digit string)
 - Playlists also need `rb_data_status=0` and `rb_local_usn` assigned
 
-### Auto-Analysis via GUI Automation
-- Only triggers when `tracks_downloaded > 0` (actual new files from YouTube)
+### Auto-Analysis via GUI Automation (rekordbox_auto.py)
+- Only triggers when `tracks_imported > 0` or `tracks_downloaded > 0`
 - Checks `Analysed=0` count first — if zero, doesn't launch Rekordbox
 - Uses pywinauto (UIA backend) to find UI elements, falls back to pyautogui keyboard shortcuts
 - Clicks Collection → Ctrl+A → right-click → Analyse Track
 - **Never overwrites existing analysis** — only Analysed=0 tracks get processed
+- **Never triggers on reorder-only syncs** (no new imports = no Rekordbox launch)
 - Rekordbox exe: `C:\Program Files\Pioneer\rekordbox 6.8.5\rekordbox.exe`
 
 ---
@@ -174,8 +208,8 @@ db.engine.dispose()
 ## Duplicate Detection (3-layer)
 Before downloading any track:
 1. **Rekordbox DB**: `find_content_by_title(artist, title)` — searches Title field, filename pattern, partial match
-2. **File index**: `_build_file_index()` — scans D:/Music Backup recursively at sync start, builds lowercase filename → path map
-3. **Music folder**: checks `Path(music_folder) / track.filename` exists
+2. **File index**: `_build_file_index()` — scans D:/Music Backup recursively at sync start, builds lowercase filename → path map (includes all playlist subfolders)
+3. **Music folder**: checks `Incoming/{PlaylistName}/track.filename` then `Incoming/track.filename`
 
 If any layer matches, skip download. If Rekordbox match found, just add existing track to playlist.
 
@@ -197,6 +231,7 @@ If any layer matches, skip download. If Rekordbox match found, just add existing
 - Always pass `ffmpeg_location` in yt-dlp options
 - Post-process to MP3 320kbps
 - Tag with mutagen (TPE1, TIT2, TALB, TDRC, APIC for artwork)
+- Save to `D:/Music Backup/Incoming/{PlaylistName}/` subfolder
 
 ---
 
@@ -207,8 +242,9 @@ If any layer matches, skip download. If Rekordbox match found, just add existing
 4. Only REMOVE tracks from playlists, or STOP syncing playlists
 5. Always use atomic writes for Traktor NML
 6. Always flush WAL after DB writes
-7. Auto-analyze only on new downloads, never on reorder-only syncs
+7. Auto-analyze only when new tracks exist, never on reorder-only syncs
 8. Auto-analyze never overwrites existing analysis (only Analysed=0)
+9. Never use librosa for analysis — Rekordbox handles it
 
 ---
 
@@ -221,11 +257,11 @@ python main.py
 ```
 
 ## State
-- `sync_state.json` — tracks which Spotify IDs have been processed per playlist
+- `sync_state.json` — tracks which Spotify IDs have been processed per playlist, stores file paths
 - `.spotify_cache` — Spotify OAuth token (auto-refreshes)
 - Clearing `sync_state.json` forces re-check of all tracks (but duplicate detection prevents re-downloads)
 
 ## Dependencies
 ```
-pip install fastapi uvicorn spotipy yt-dlp mutagen librosa numpy pyrekordbox python-dotenv requests pyautogui pygetwindow pywinauto psutil
+pip install fastapi uvicorn spotipy yt-dlp mutagen librosa numpy pyrekordbox python-dotenv requests psutil pyautogui pygetwindow pywinauto
 ```

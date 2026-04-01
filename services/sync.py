@@ -247,14 +247,21 @@ class SyncOrchestrator:
                     dest_path = Path(existing_file)
                     self.progress.tracks_skipped += 1
                     logger.info("File found in library: %s", dest_path)
+                elif (Path(music_folder) / display_name / track.filename).exists():
+                    dest_path = Path(music_folder) / display_name / track.filename
+                    self.progress.tracks_skipped += 1
+                    logger.info("File found in playlist folder: %s", dest_path)
                 elif (Path(music_folder) / track.filename).exists():
                     dest_path = Path(music_folder) / track.filename
                     self.progress.tracks_skipped += 1
                     logger.info("File found in music folder: %s", dest_path)
 
                 if dest_path is None:
-                    # Download
+                    # Download into playlist subfolder
                     self.progress.message = f"Downloading: {track.artist} - {track.title}"
+                    playlist_folder = Path(music_folder) / display_name
+                    playlist_folder.mkdir(parents=True, exist_ok=True)
+
                     with tempfile.TemporaryDirectory(prefix="sff_dl_") as tmp_dir:
                         downloaded = download_track(track, tmp_dir)
                         if not downloaded:
@@ -264,13 +271,12 @@ class SyncOrchestrator:
 
                         self.progress.tracks_downloaded += 1
 
-                        # Move to music folder
-                        Path(music_folder).mkdir(parents=True, exist_ok=True)
+                        # Move to playlist subfolder
                         import shutil
-                        final_path = Path(music_folder) / downloaded.name
+                        final_path = playlist_folder / downloaded.name
                         counter = 1
                         while final_path.exists():
-                            final_path = Path(music_folder) / f"{downloaded.stem}_{counter}{downloaded.suffix}"
+                            final_path = playlist_folder / f"{downloaded.stem}_{counter}{downloaded.suffix}"
                             counter += 1
                         shutil.move(str(downloaded), str(final_path))
                         dest_path = final_path
@@ -349,14 +355,14 @@ class SyncOrchestrator:
         # Flush WAL so Rekordbox can see our changes
         rb.flush_wal()
 
-        # Auto-analyze: only if we actually downloaded new tracks
-        # Opens Rekordbox and triggers analysis ONLY on unanalyzed tracks (Analysed=0)
-        # Will NOT re-analyze tracks you've already manually analyzed
-        if self.progress.tracks_downloaded > 0:
-            self.progress.message = "Launching Rekordbox to analyze new tracks..."
+        # Auto-analyze: check if there are ANY unanalyzed tracks in Rekordbox
+        # Only triggers on unanalyzed tracks (Analysed=0) — never overwrites existing analysis
+        if self.progress.tracks_imported > 0 or self.progress.tracks_downloaded > 0:
             try:
                 from services.rekordbox_auto import launch_and_analyze_unanalyzed
                 auto_result = launch_and_analyze_unanalyzed()
+                if auto_result.get("status") != "nothing to analyze":
+                    self.progress.message = f"Rekordbox analyzing {auto_result.get('unanalyzed', 0)} tracks..."
                 logger.info("Auto-analyze result: %s", auto_result)
             except Exception as e:
                 logger.warning("Auto-analyze failed (analyze manually in Rekordbox): %s", e)
