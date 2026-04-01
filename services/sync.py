@@ -355,17 +355,23 @@ class SyncOrchestrator:
         # Flush WAL so Rekordbox can see our changes
         rb.flush_wal()
 
-        # Auto-analyze: check if there are ANY unanalyzed tracks in Rekordbox
-        # Only triggers on unanalyzed tracks (Analysed=0) — never overwrites existing analysis
-        if self.progress.tracks_imported > 0 or self.progress.tracks_downloaded > 0:
+        # NOTE: Auto-analyze via GUI automation is DISABLED.
+        # Rekordbox's Ctrl+A selects ALL tracks in Collection, causing it to
+        # re-analyze already-analyzed tracks. There is no way to filter/select
+        # only unanalyzed tracks via GUI automation.
+        # Instead: after sync, open Rekordbox manually, go to each new FF playlist,
+        # select all, right-click → Analyse Track. This only analyzes that playlist.
+        if self.progress.tracks_downloaded > 0:
             try:
-                from services.rekordbox_auto import launch_and_analyze_unanalyzed
-                auto_result = launch_and_analyze_unanalyzed()
-                if auto_result.get("status") != "nothing to analyze":
-                    self.progress.message = f"Rekordbox analyzing {auto_result.get('unanalyzed', 0)} tracks..."
-                logger.info("Auto-analyze result: %s", auto_result)
-            except Exception as e:
-                logger.warning("Auto-analyze failed (analyze manually in Rekordbox): %s", e)
+                from services.rekordbox_auto import _count_unanalyzed
+                unanalyzed = _count_unanalyzed()
+                if unanalyzed > 0:
+                    self.progress.message = (
+                        f"Sync complete. {unanalyzed} tracks need analysis in Rekordbox. "
+                        f"Open Rekordbox → select new FF playlists → Analyse Track."
+                    )
+            except Exception:
+                pass
 
         self._save_state()
         return self.get_progress()
