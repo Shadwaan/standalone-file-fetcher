@@ -248,7 +248,7 @@
             <button class="usb-btn no-drive" id="usbBtn" onclick="startUSBExport()" disabled>Sync (USB)</button>
         </div>
         <div class="usb-drive-info" id="usbDriveInfo">
-            <span class="disconnected">No USB drive detected</span>
+            <span class="disconnected">Drive not connected</span>
         </div>
 
         <div class="card" id="statusCard" style="display:none">
@@ -478,7 +478,7 @@
                     btn.textContent = 'Sync (USB)';
                 } else {
                     usbDrive = null;
-                    info.innerHTML = '<span class="disconnected">No USB drive detected</span>';
+                    info.innerHTML = '<span class="disconnected">Drive not connected</span>';
                     btn.disabled = true;
                     btn.classList.add('no-drive');
                     btn.textContent = 'Sync (USB)';

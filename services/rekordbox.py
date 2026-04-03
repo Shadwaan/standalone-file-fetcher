@@ -590,42 +590,50 @@ def find_content_by_path(file_path: str) -> str | None:
 
 
 def find_content_by_title(artist: str, title: str) -> tuple[str, str] | None:
-    """Find Rekordbox content by artist+title search. Returns (content_id, file_path) or None."""
+    """Find Rekordbox content by artist+title search. Returns (content_id, file_path) or None.
+    MUST match BOTH artist AND title to avoid false positives (e.g. 'Dreamer' by different artists)."""
     try:
         from pyrekordbox import Rekordbox6Database
         from pyrekordbox.db6 import tables
 
         db = Rekordbox6Database()
 
-        # Strategy 1: Match by Title field (Rekordbox stores title separately)
         title_lower = title.strip().lower()
         artist_lower = artist.strip().lower()
+        first_artist = artist_lower.split(",")[0].strip()
 
-        for content in db.session.query(tables.DjmdContent).all():
-            ct = str(getattr(content, 'Title', '') or '').strip().lower()
-            if ct == title_lower:
-                # Title matches — check if artist is in the filename or path
-                fp = str(getattr(content, 'FolderPath', '') or '')
-                fp_lower = fp.lower()
-                # Good enough match if title is exact
-                logger.info("Found in Rekordbox by title: '%s' (ID=%s)", title, content.ID)
-                return (str(content.ID), fp)
-
-        # Strategy 2: Match by filename pattern "Artist - Title"
+        # Strategy 1: Match by filename pattern "Artist - Title" (most reliable)
         target_name = f"{artist} - {title}".lower()
         for content in db.session.query(tables.DjmdContent).all():
             fp = str(getattr(content, 'FolderPath', '') or '')
             fname = Path(fp).stem.lower()
             if fname == target_name:
-                logger.info("Found in Rekordbox by filename: '%s' (ID=%s)", target_name, content.ID)
+                logger.info("Found in Rekordbox by exact filename: '%s' (ID=%s)", target_name, content.ID)
                 return (str(content.ID), fp)
 
-        # Strategy 3: Partial filename match (artist - title anywhere in filename)
+        # Strategy 2: Match by Title + verify artist is in the filename or path
+        for content in db.session.query(tables.DjmdContent).all():
+            ct = str(getattr(content, 'Title', '') or '').strip().lower()
+            if ct == title_lower:
+                fp = str(getattr(content, 'FolderPath', '') or '')
+                fp_lower = fp.lower()
+                # Artist MUST appear in the file path
+                if first_artist in fp_lower:
+                    logger.info("Found in Rekordbox by title+artist: '%s' by '%s' (ID=%s)", title, artist, content.ID)
+                    return (str(content.ID), fp)
+                # Also check ArtistID
+                if getattr(content, 'ArtistID', None):
+                    artist_obj = db.session.query(tables.DjmdArtist).filter_by(ID=content.ArtistID).first()
+                    if artist_obj and first_artist in str(artist_obj.Name or '').lower():
+                        logger.info("Found in Rekordbox by title+ArtistID: '%s' by '%s' (ID=%s)", title, artist, content.ID)
+                        return (str(content.ID), fp)
+
+        # Strategy 3: Partial filename match — artist AND title both in filename
         for content in db.session.query(tables.DjmdContent).all():
             fp = str(getattr(content, 'FolderPath', '') or '')
             fname = Path(fp).stem.lower()
-            if title_lower in fname and artist_lower.split(",")[0].strip() in fname:
-                logger.info("Found in Rekordbox by partial match: '%s' in '%s' (ID=%s)", title, fname, content.ID)
+            if title_lower in fname and first_artist in fname:
+                logger.info("Found in Rekordbox by partial match: '%s' by '%s' in '%s' (ID=%s)", title, first_artist, fname, content.ID)
                 return (str(content.ID), fp)
 
         return None

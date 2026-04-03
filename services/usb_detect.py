@@ -11,8 +11,8 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
-# Drives to always skip (system + music storage)
-SKIP_DRIVES = {"C:", "D:"}
+# Drives to always skip (system + music storage + partitions)
+SKIP_DRIVES = {"C:", "D:", "E:"}
 
 
 def detect_usb_drives() -> list[dict]:
