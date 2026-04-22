@@ -428,12 +428,14 @@ def find_or_create_playlist(playlist_name: str) -> str | None:
         playlist.Seq = 0
         playlist.Attribute = 0
         playlist.ParentID = 'root'
-        playlist.rb_data_status = 1
+        playlist.rb_data_status = 0
         playlist.rb_local_data_status = 0
         playlist.rb_local_deleted = 0
         playlist.rb_local_synced = 0
-        playlist.usn = 0
-        playlist.rb_local_usn = 0
+        playlist.usn = None
+        from sqlalchemy import func as sa_func
+        max_usn = db.session.query(sa_func.max(tables.DjmdPlaylist.rb_local_usn)).scalar() or 0
+        playlist.rb_local_usn = max_usn + 1
         playlist.created_at = datetime.now(timezone.utc)
         playlist.updated_at = datetime.now(timezone.utc)
         db.session.add(playlist)
@@ -643,16 +645,32 @@ def find_content_by_title(artist: str, title: str) -> tuple[str, str] | None:
 
 
 def flush_wal():
-    """Checkpoint the WAL file into master.db so Rekordbox can see our changes."""
+    """Checkpoint the WAL file into master.db so Rekordbox can see our changes.
+    Runs checkpoint twice to ensure all writes are flushed — pyrekordbox opens
+    new connections per call, each creating WAL entries."""
     try:
         from pyrekordbox import Rekordbox6Database
         from sqlalchemy import text
+        import os
 
+        # First pass: flush everything written so far
         db = Rekordbox6Database()
         db.session.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
         db.session.commit()
         db.session.close()
         db.engine.dispose()
-        logger.info("WAL checkpoint complete — changes flushed to master.db")
+
+        # Second pass: the first checkpoint itself may have created WAL entries
+        db2 = Rekordbox6Database()
+        db2.session.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        db2.session.commit()
+        db2.session.close()
+        db2.engine.dispose()
+
+        # Verify WAL is actually empty
+        db_dir_path = os.path.join(os.environ.get("APPDATA", ""), "Pioneer", "rekordbox")
+        wal_path = os.path.join(db_dir_path, "master.db-wal")
+        wal_size = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
+        logger.info("WAL checkpoint complete — WAL size: %d bytes", wal_size)
     except Exception as e:
         logger.error("WAL checkpoint failed: %s", e)

@@ -1,7 +1,7 @@
 # Standalone File Fetcher — Product Requirements Document
 
 ## Vision
-A standalone application that bridges Spotify playlists to Rekordbox and Traktor DJ libraries. Automatically discovers FF-prefixed playlists from Spotify, downloads audio from YouTube, imports tracks to both Rekordbox master.db and Traktor collection.nml, creates/syncs playlists, and auto-launches Rekordbox to analyze new tracks.
+A standalone application that bridges Spotify playlists to Rekordbox and Traktor DJ libraries. Automatically discovers FF-prefixed playlists from Spotify, downloads audio from YouTube, imports tracks to both Rekordbox master.db and Traktor collection.nml, creates/syncs playlists, and optionally exports all FF playlists to USB pen drive for CDJ hardware.
 
 **Target User:** DJ SupahFunk — Professional DJ performing with Rekordbox/CDJ-3000 hardware, managing 4,800+ tracks across Rekordbox and Traktor.
 
@@ -12,6 +12,7 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 ### 1. Pre-flight Check
 - **Check if Rekordbox is running** — refuse to sync if it is, show error to user
 - Rekordbox locks master.db; writing while it's open causes corruption or invisible writes
+- Rekordbox open also creates its own WAL which can conflict with our writes
 
 ### 2. Discover Playlists
 - Connect to Spotify via spotipy (OAuth for private playlists)
@@ -20,7 +21,11 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 - Use `.get()` for all Spotify API fields — some playlist items may have missing keys
 
 ### 3. Duplicate Detection (3-layer, before downloading)
-- **Layer 1: Rekordbox DB** — search by Title field across entire master.db, fallback to filename match, then partial artist+title match
+**CRITICAL:** All 3 strategies MUST match BOTH artist AND title — never title alone (title-alone matching caused "Dreamer" by Four Tet to match a different "Dreamer").
+- **Layer 1: Rekordbox DB** — `find_content_by_title(artist, title)`:
+  - Strategy A: Exact filename match `"Artist - Title"`
+  - Strategy B: Title field match + verify artist is in filepath OR ArtistID
+  - Strategy C: Partial filename match — both artist AND title in filename
 - **Layer 2: File index** — recursively scan `D:/Music Backup` (and music folder + playlist subfolders) for matching filenames at sync start
 - **Layer 3: Music folder** — check playlist subfolder path, then root music folder path
 - Only download if ALL three layers find no match
@@ -45,6 +50,7 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 - **CRITICAL: Set attributes individually** (NOT kwargs — ArtistName is an association proxy)
 - **CRITICAL: Must set FileType=1, BitRate=320, SampleRate=44100** — without these Rekordbox shows red ? icons
 - **CRITICAL: Set `rb_data_status=0`** and assign sequential `rb_local_usn` — `rb_data_status=1` makes tracks invisible to Rekordbox
+- **CRITICAL: PLAYLISTS ALSO need `rb_data_status=0` + `rb_local_usn`** — if only content has this, playlist shows empty even though rows exist in DjmdSongPlaylist
 - Artist/Album: lookup existing only, do NOT create new DjmdArtist/DjmdAlbum
 - `updated_at` must be `datetime` objects, NOT `.isoformat()` strings
 
@@ -54,28 +60,32 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 - LOCATION format: VOLUME + DIR (/:separated/:) + FILE
 - ATOMIC writes: temp file → parse to verify → backup original → replace
 
-### 7. WAL Checkpoint (CRITICAL)
-- After all DB writes, run `PRAGMA wal_checkpoint(TRUNCATE)`
+### 7. WAL Checkpoint (CRITICAL — DOUBLE FLUSH REQUIRED)
+- After all DB writes, run `PRAGMA wal_checkpoint(TRUNCATE)` **TWICE**
 - pyrekordbox uses SQLite WAL mode — writes go to a separate WAL file
 - **Rekordbox reads master.db directly and does NOT see WAL contents**
-- Without this checkpoint, all imports are invisible to Rekordbox
-- Must also `session.close()` and `engine.dispose()` after checkpoint
+- Without this checkpoint, all imports are invisible to Rekordbox (playlists show 0 tracks)
+- pyrekordbox opens a new DB connection per operation, each creating WAL entries
+- First checkpoint flushes existing writes; second catches any WAL entries created by the first
+- Must `session.close()` and `engine.dispose()` between the two flushes
+- Verify WAL file size is 0 bytes after — if not, Rekordbox won't see changes
+- If Rekordbox is open during/after flush, it creates its OWN WAL which can mask our writes — close Rekordbox and reopen to force it to reload master.db
 
-### 8. Auto-Analysis via Rekordbox GUI
-- Triggers when `tracks_imported > 0` or `tracks_downloaded > 0`
-- First checks DB for `Analysed=0` count — if zero, skips entirely (no Rekordbox launch)
-- Launches Rekordbox, waits for window (90s timeout + 15s UI load)
-- Clicks Collection → Ctrl+A → right-click → Analyse Track
-- Uses pywinauto (UI Automation backend) to find elements, falls back to keyboard shortcuts
-- **Does NOT overwrite existing analysis** — only tracks with `Analysed=0` get analyzed by Rekordbox
-- Tracks already analyzed (Analysed=105) are untouched
-- **Does NOT trigger on reorder-only syncs** (no new imports = no Rekordbox launch)
-- **Rekordbox has NO auto-analyze on startup and NO CLI** — GUI automation is the only way
+### 8. Auto-Analysis (CURRENTLY DISABLED)
+- **Auto-analyze via GUI automation is DISABLED** because Rekordbox Ctrl+A selects ALL tracks in Collection, causing it to re-analyze already-analyzed tracks
+- No way to filter/select only unanalyzed tracks via GUI automation
+- After sync, UI shows: "Sync complete. N tracks need analysis. Open Rekordbox → select new FF playlists → Analyse Track"
+- User manually analyzes per-playlist (in Rekordbox: click playlist → Ctrl+A → right-click → Analyse Track)
+- This way only that playlist's tracks are touched, not the entire library
+- Rekordbox has NO auto-analyze on startup and NO CLI — manual per-playlist is the only safe approach
+- `rekordbox_auto.py` and `_count_unanalyzed()` still exist for detecting how many tracks need analysis
 
 ### 9. Create Playlists
 - Create matching playlists in BOTH Rekordbox DB and Traktor NML
 - Strip prefix: "FF Opening" → "Opening"
 - New playlists at TOP of stack (Seq=0 in Rekordbox, insert at index 0 in NML)
+- **CRITICAL: Playlist row needs rb_data_status=0 AND rb_local_usn assigned**
+- Songs within playlist (DjmdSongPlaylist) can have rb_data_status=1 — that's how working playlists look
 
 ### 10. Sync Ordering
 - On each sync, read Spotify track order
@@ -91,6 +101,31 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 - NEVER delete the track from the library
 - Playlist no longer prefixed → stop syncing, NEVER delete RB/TK playlist
 
+### 13. USB Export (BUILT)
+- "Sync (USB)" button in the UI next to main Sync button
+- Greyed out with "Drive not connected" when no USB detected
+- Polls every 5 seconds for USB drive presence
+- When USB detected, shows drive name + free space
+- On click:
+  - Reads FF playlists from Rekordbox master.db (identified by tracks in music folder path)
+  - Creates `USB:/PIONEER/USBANLZ/`, `USB:/PIONEER/rekordbox/`, `USB:/Contents/` directories
+  - Copies audio files to `USB:/Contents/{PlaylistName}/`
+  - Skips copy if destination file exists with same size
+  - Copies ANLZ files from local `%APPDATA%/Pioneer/rekordbox/share/PIONEER/USBANLZ/` (if track is analyzed)
+  - **Rewrites PPTH tags inside ANLZ to use USB-relative paths** (`Contents/{Playlist}/{file}`)
+  - Writes `USB:/PIONEER/rekordbox/rekordbox.xml` with all playlists + tracks for CDJ import
+- Uses direct USB write approach (does NOT use Rekordbox GUI automation for export)
+- Limitation: does NOT create Device Library Plus format (`exportLibrary.db`) — only Rekordbox's native export does that
+
+---
+
+## USB Drive Detection
+- Scans drive letters E: through Z: on Windows
+- **Skips C:, D:, and E:** — C: is system, D: is music storage, E: is SSD partition (not removable)
+- Uses `shutil.disk_usage()` for size info
+- Uses `wmic logicaldisk` to get volume name
+- Checks for existing PIONEER/ folder to flag as "has_rekordbox"
+
 ---
 
 ## File Organization
@@ -105,18 +140,22 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 1. NEVER delete tracks from Rekordbox/Traktor library — only remove from playlists
 2. NEVER delete playlists from Rekordbox/Traktor — only stop syncing
 3. NEVER sync while Rekordbox is running — check process list and refuse
-4. Always use atomic writes for Traktor NML (temp → verify → backup → replace)
-5. Always set DjmdContent attributes individually (not kwargs)
-6. Always generate explicit IDs for new Rekordbox DB rows
-7. Always set FileType=1, BitRate=320, SampleRate=44100 on DjmdContent
-8. Always set rb_data_status=0 and assign rb_local_usn on new content
-9. Always flush WAL after DB writes (`PRAGMA wal_checkpoint(TRUNCATE)`)
-10. Always strip prefix from playlist names ("FF Opening" → "Opening")
-11. New playlists go to Seq=0 (top) in Rekordbox
-12. Always pass ffmpeg_location to yt-dlp (PATH alone is unreliable)
-13. Auto-analyze only triggers when new tracks exist, never on reorder-only syncs
-14. Auto-analyze never overwrites existing analysis (only Analysed=0 tracks)
-15. Download into playlist subfolders, not flat in Incoming root
+4. NEVER match duplicates by title alone — always require artist+title match
+5. Always use atomic writes for Traktor NML (temp → verify → backup → replace)
+6. Always set DjmdContent attributes individually (not kwargs)
+7. Always generate explicit IDs for new Rekordbox DB rows (content, playlist, song_playlist)
+8. Always set FileType=1, BitRate=320, SampleRate=44100 on DjmdContent
+9. Always set rb_data_status=0 and assign rb_local_usn on new content AND new playlists
+10. Always flush WAL TWICE after DB writes (`PRAGMA wal_checkpoint(TRUNCATE)`)
+11. Always verify WAL file is 0 bytes after flush — if not, Rekordbox won't see changes
+12. Always strip prefix from playlist names ("FF Opening" → "Opening")
+13. New playlists go to Seq=0 (top) in Rekordbox, bump existing Seq values up
+14. Always pass ffmpeg_location to yt-dlp (PATH alone is unreliable)
+15. Never use librosa for analysis — Rekordbox handles it
+16. Never write ANLZ files during import — Rekordbox creates them during its analysis
+17. Rewrite PPTH paths in ANLZ files when copying to USB (must be USB-relative)
+18. Download into playlist subfolders, not flat in Incoming root
+19. Skip C:, D:, E: in USB detection (system + music + partition)
 
 ---
 
@@ -131,21 +170,29 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 | Rekordbox import crashes (NULL identity key) | pyrekordbox requires explicit IDs on all tables | Generate random 9-digit string ID, verify uniqueness |
 | Artist creation crashes transaction | DjmdArtist needs explicit ID, flush rolls back everything | Don't create new artists — lookup existing only |
 | Tracks in Rekordbox show red ? icons | Missing FileType, BitRate, SampleRate fields | Set FileType=1, BitRate=320, SampleRate=44100 |
-| Tracks invisible in Rekordbox | `rb_data_status=1` means "pending sync" — RB ignores these | Set `rb_data_status=0` and assign sequential `rb_local_usn` |
+| Content invisible in Rekordbox | `rb_data_status=1` means "pending sync" — RB ignores these | Set `rb_data_status=0` and assign sequential `rb_local_usn` |
+| **Playlist shows empty even with songs in DjmdSongPlaylist** | Playlist row had `rb_data_status=1` but content was fine | Set `rb_data_status=0` and `rb_local_usn` on DjmdPlaylist too, not just DjmdContent |
 | Playlists show 0 tracks in Rekordbox | Writes stuck in WAL file, not checkpointed to master.db | Run `PRAGMA wal_checkpoint(TRUNCATE)` after all writes |
+| **Single WAL flush insufficient** | pyrekordbox opens new connection per call, each creating WAL | Double flush: checkpoint, close, dispose, open new session, checkpoint again |
+| **Rekordbox open during/after sync masks changes** | Rekordbox creates its own WAL and loads master.db into memory on start | Close Rekordbox completely, reopen after sync completes |
 | Duplicate downloads on first run | sync_state.json starts empty, no library check | 3-layer duplicate detection: RB title search + file index + path check |
+| **Wrong tracks matched as duplicates** | Strategy 1 matched by title alone ("Dreamer" by Four Tet matched different Dreamer) | All 3 strategies now require BOTH artist AND title match |
 | Bad BPM/beatgrid from librosa | librosa analysis inferior to Rekordbox for DJ music | Let Rekordbox handle all analysis — import with Analysed=0 |
 | Rekordbox won't re-analyze imported tracks | Old librosa ANLZ files + Analysed=105 make RB think they're done | Import with Analysed=0, never write ANLZ files |
-| Auto-analyze didn't trigger | Checked `tracks_downloaded > 0` but files existed (skipped download) | Check `tracks_imported > 0` OR `tracks_downloaded > 0` |
-| Auto-analyze re-analyzed everything | All tracks had Analysed=0 after librosa cleanup | One-time fix; going forward only new tracks have Analysed=0 |
+| **Auto-analyze re-analyzed ENTIRE library** | Ctrl+A in Collection selects all 5000+ tracks, RB re-analyzes all | DISABLED auto-analyze; user analyzes per-playlist manually |
+| Auto-analyze didn't trigger | Checked `tracks_downloaded > 0` but files existed (skipped download) | (Moot — auto-analyze now disabled) |
 | All files dumped in one folder | No organization by playlist | Download into `Incoming/{PlaylistName}/` subfolders |
+| **E: drive detected as USB** | E: is SSD partition, was matched by drive letter scan | Added E: to SKIP_DRIVES along with C: and D: |
 
 ---
 
 ## UI
 - Single HTML page served by FastAPI on localhost:8899
-- "Sync" button to trigger full pipeline (runs in background thread)
-- Live progress polling (1-second interval)
+- **Two buttons side by side**:
+  - "Sync" (green) — triggers Spotify → Rekordbox/Traktor sync
+  - "Sync (USB)" (blue) — exports FF playlists to USB. Greyed out with "Drive not connected" when no USB. Shows "{Volume Name} ({Letter}:) — {N} GB free" when detected.
+- Live progress polling (1-second interval during operations)
+- USB drive polling every 5 seconds
 - Shows: sync status, download/import/skip/fail counts, playlist list with track counts, errors, last sync time
 - Config display: prefix, music folder, Rekordbox/Traktor connection status
 
@@ -163,15 +210,17 @@ standalone-file-fetcher/
 ├── requirements.txt
 ├── main.py                 # FastAPI server on port 8899
 ├── frontend/
-│   └── index.html          # Sync UI
+│   └── index.html          # Sync UI (dual buttons: Sync + Sync USB)
 ├── services/
 │   ├── spotify.py          # Spotify OAuth + playlist discovery + track listing
 │   ├── downloader.py       # YouTube search + yt-dlp download + ffmpeg convert + ID3 tagging
 │   ├── analyzer.py         # librosa analysis (UNUSED — kept for reference, Rekordbox handles analysis)
-│   ├── rekordbox.py        # Rekordbox DB import (unanalyzed) + ANLZ writer (legacy) + WAL flush + playlist CRUD
-│   ├── rekordbox_auto.py   # GUI automation: launch Rekordbox + trigger analysis on unanalyzed tracks
+│   ├── rekordbox.py        # Rekordbox DB import (unanalyzed) + ANLZ writer (legacy) + WAL flush + playlist CRUD + artist+title duplicate detection
+│   ├── rekordbox_auto.py   # GUI automation helpers (auto-analyze DISABLED; _count_unanalyzed still used)
 │   ├── traktor.py          # Traktor NML import (unanalyzed) + atomic writes + playlist CRUD
-│   └── sync.py             # Orchestrator: preflight → discover → dedupe → download → import → playlist → WAL flush → auto-analyze
+│   ├── usb_detect.py       # USB drive detection (skips C:, D:, E:)
+│   ├── usb_export.py       # USB export: audio copy, ANLZ copy with PPTH rewrite, Rekordbox XML write
+│   └── sync.py             # Orchestrator: preflight → discover → dedupe → download → import → playlist → WAL flush (double)
 └── models/
     └── track.py            # TrackInfo + AnalysisResult dataclasses
 ```
@@ -188,31 +237,36 @@ pyautogui, pygetwindow, pywinauto
 cd D:/Code/standalone-file-fetcher
 pip install -r requirements.txt
 python main.py
-# Open http://localhost:8899, click Sync
+# Open http://localhost:8899, click Sync or Sync (USB)
 ```
 
 ---
 
-## Next Phase: USB Export (NOT YET BUILT)
+## Recovery Commands (when things go wrong)
 
-### Goal
-After sync + analysis, auto-export FF playlists to USB pen drive for CDJ hardware. Support both Device Library Plus (`exportLibrary.db`) and legacy (`export.pdb`) formats. Keep USB in sync with local Rekordbox library.
+### Flush WAL manually (if Rekordbox shows empty playlists)
+```python
+cd "D:/Code/standalone-file-fetcher" && python -c "
+from dotenv import load_dotenv; load_dotenv()
+from pyrekordbox import Rekordbox6Database
+from sqlalchemy import text
+for _ in range(2):
+    db = Rekordbox6Database()
+    db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+    db.session.commit()
+    db.session.close()
+    db.engine.dispose()
+"
+```
 
-### Approach
-Automate Rekordbox's own "Export to Device" function via GUI automation (pywinauto/pyautogui). Rekordbox natively writes both Device Library Plus and legacy formats — don't reinvent this.
+### Fix playlists with rb_data_status=1
+```python
+# See services/rekordbox.py find_or_create_playlist — ensures rb_data_status=0
+# To manually fix: iterate DjmdPlaylist, set rb_data_status=0 and assign rb_local_usn
+```
 
-### Flow
-1. Sync downloads + imports tracks (existing pipeline)
-2. WAL flush (existing)
-3. Rekordbox opens → analyzes unanalyzed tracks (existing)
-4. **Poll DB until `Analysed=0` count reaches zero** (analysis complete)
-5. For each FF playlist: right-click → "Export to Device" → select USB drive
-6. Rekordbox writes Device Library Plus + legacy PDB + ANLZ files to USB
-
-### Key Considerations
-- Must detect USB drives (see FM's `usb_exporter.py` `detect_removable_drives()` for reference)
-- Must wait for analysis to complete before exporting (poll `Analysed=0` count)
-- Rekordbox's export dialog needs GUI automation to select the target drive
-- Should only export playlists that changed since last export (track export state)
-- The FM codebase at `D:/Code/DJ/DJ File Manager/backend/services/usb_exporter.py` has reference code for USB detection, ANLZ writing, Rekordbox XML, and Traktor NML — but we should prefer Rekordbox's native export for Device Library Plus support
-- UI: add "Export to USB" button alongside Sync, or chain it automatically after Sync
+### Reset tracks to unanalyzed (if librosa ANLZ files are polluting)
+```python
+# Set Analysed=0, BPM=0, KeyID=None, AnalysisDataPath=None
+# Delete corresponding ANLZ directory under %APPDATA%/Pioneer/rekordbox/share/PIONEER/USBANLZ/
+```
