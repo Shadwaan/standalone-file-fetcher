@@ -215,11 +215,24 @@ content.Analysed = 0
 ### 14. Auto-analyze would re-analyze everything — DISABLED
 Rekordbox GUI's Ctrl+A selects ALL tracks in Collection (5000+), causing re-analysis of the entire library. There's no GUI way to filter only unanalyzed tracks. **Auto-analyze is disabled.** User analyzes per-playlist manually.
 
-### 15. USB detection: skip C:, D:, E: on this machine
-E: is an SSD partition, not a removable USB drive. Add to SKIP_DRIVES:
+### 15. USB detection is NOT PROPERLY FIXED (hardcoded skip list)
+**This is an unresolved issue.** The code doesn't actually detect whether a drive is removable — it just lists all drive letters and skips a hardcoded set. E: is an SSD partition on this machine but looks identical to a USB drive via `os.path.exists()`.
+
+Current workaround:
 ```python
 SKIP_DRIVES = {"C:", "D:", "E:"}
 ```
+
+**This only works on THIS machine.** If the user has a different partition layout, or plugs a real USB into E:, this breaks. The fragile hardcoded list gets stale fast.
+
+**Proper fix (do this if user keeps hitting this):**
+```python
+import ctypes
+drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{letter}:\\")
+# Only accept drive_type == 2 (DRIVE_REMOVABLE)
+# DRIVE_FIXED=3 (SSDs, partitions) would be correctly skipped
+```
+This uses the Windows API to check actual drive type, making the detection robust regardless of drive letter.
 
 ---
 

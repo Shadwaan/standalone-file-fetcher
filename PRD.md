@@ -120,8 +120,32 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 ---
 
 ## USB Drive Detection
+
+### ⚠️ KNOWN UNRESOLVED ISSUE
+**USB detection is NOT robust.** It currently uses a hardcoded skip list of `{"C:", "D:", "E:"}` on this machine because there's no reliable way with stdlib to distinguish a removable USB drive from an SSD partition. The code does NOT actually check if a drive is removable — it just lists all drive letters that exist and filters by letter.
+
+**What goes wrong:**
+- E: is an SSD partition on this machine, not a removable drive
+- The code still detects E: as "connected USB" because it just checks `os.path.exists("E:/")`
+- Current workaround: `SKIP_DRIVES = {"C:", "D:", "E:"}` in `services/usb_detect.py`
+- This only works on THIS machine — breaks if user has a real USB at E:, or has different partition layout
+
+**Proper fix (not yet implemented):**
+Use Windows API via `ctypes` to check drive type:
+```python
+import ctypes
+drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{letter}:\\")
+# 2 = DRIVE_REMOVABLE (USB stick, SD card)
+# 3 = DRIVE_FIXED (hard drive, SSD)
+# 4 = DRIVE_REMOTE (network)
+# 5 = DRIVE_CDROM
+# Only accept drive_type == 2
+```
+This would let us auto-detect actual USB drives regardless of letter, and not need a hardcoded skip list.
+
+### Current Implementation
 - Scans drive letters E: through Z: on Windows
-- **Skips C:, D:, and E:** — C: is system, D: is music storage, E: is SSD partition (not removable)
+- **Hardcoded skip: C:, D:, E:** — C: is system, D: is music storage, E: is SSD partition (fragile)
 - Uses `shutil.disk_usage()` for size info
 - Uses `wmic logicaldisk` to get volume name
 - Checks for existing PIONEER/ folder to flag as "has_rekordbox"
