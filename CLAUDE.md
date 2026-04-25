@@ -295,6 +295,7 @@ This uses the Windows API to check actual drive type, making the detection robus
 
 ### DjmdPlaylist Creation
 - Set `.ID` = random 10-digit string (verify unique)
+- **Set `.UUID` = `str(uuid.uuid4())`** — CRITICAL. Without UUID, the playlist will appear empty in Rekordbox UI even when DjmdSongPlaylist + DjmdContent rows are all correct. Verified 2026-04-25 r5 via NuJungle empty-playlist bug.
 - Set `.Name`, `.Seq` = 0 (top), bump existing Seq values up
 - Set `.Attribute` = 0, `.ParentID` = 'root'
 - **CRITICAL: Set `.rb_data_status` = 0** (not 1 — that's what broke Moroccan Moonlight)

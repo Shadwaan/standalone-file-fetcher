@@ -532,8 +532,10 @@ def find_or_create_playlist(playlist_name: str) -> str | None:
             if pl.Seq is not None:
                 pl.Seq = (pl.Seq or 0) + 1
 
+        import uuid as _uuid
         playlist = tables.DjmdPlaylist()
         playlist.ID = str(abs(hash(f'sff_{playlist_name}')) % (10 ** 10))
+        playlist.UUID = str(_uuid.uuid4())  # CRITICAL: without UUID, playlist appears empty in Rekordbox UI
         playlist.Name = playlist_name
         playlist.Seq = 0
         playlist.Attribute = 0
