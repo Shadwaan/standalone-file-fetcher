@@ -276,7 +276,8 @@ This uses the Windows API to check actual drive type, making the detection robus
 - **Set `.UUID` = `str(uuid.uuid4())`** — CRITICAL. Rekordbox uses this to build the ANLZ path `/PIONEER/USBANLZ/{uuid[:3]}/{uuid[3:]}/ANLZ0000.DAT`. Without it, Rekordbox writes to broken sentinel path `/PIONEER/USBANLZ///ANLZ0018.DAT` and batch analysis hangs.
 - Set `.FolderPath` = forward-slash normalized path (including playlist subfolder)
 - Set `.Title`, `.FileNameL`, `.FileSize`
-- Set `.FileType` = 1, `.BitRate` = 320, `.SampleRate` = 44100
+- Set `.FileType` = 1
+- **Set `.BitRate` and `.SampleRate` from the actual MP3 file** via `mutagen.mp3.MP3.info.sample_rate` and `info.bitrate // 1000`. Hardcoding 44100 caused analysis hangs because yt-dlp outputs 48000Hz MP3s; Rekordbox sees the DB/file SR mismatch and struggles. Verified 2026-04-25.
 - **Set `.ArtistID`** to a real DjmdArtist row (use `_get_or_create_artist` which sets UUID on artist too)
 - **Set `.AlbumID`** to a real DjmdAlbum row (use `_get_or_create_album` which sets UUID on album too)
 - **Drag-import parity fields** (without these, batch analysis hangs):

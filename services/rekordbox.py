@@ -329,6 +329,19 @@ def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
         import uuid as _uuid
         today = datetime.now().strftime('%Y-%m-%d')
 
+        # Read actual SampleRate from MP3 file — yt-dlp output is 48000 Hz
+        # Hardcoding 44100 caused Rekordbox analysis hangs because of mismatch
+        actual_sr = 44100
+        actual_bitrate = 320
+        try:
+            from mutagen.mp3 import MP3
+            audio = MP3(file_path)
+            actual_sr = audio.info.sample_rate
+            if audio.info.bitrate:
+                actual_bitrate = audio.info.bitrate // 1000  # mutagen returns bps
+        except Exception:
+            pass
+
         content = tables.DjmdContent()
         content.ID = new_id
         content.UUID = str(_uuid.uuid4())  # CRITICAL: Rekordbox uses UUID to build ANLZ paths
@@ -337,8 +350,8 @@ def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
         content.FileNameL = Path(file_path).name
         content.FileSize = Path(file_path).stat().st_size if Path(file_path).exists() else 0
         content.FileType = 1      # MP3
-        content.BitRate = 320
-        content.SampleRate = 44100
+        content.BitRate = actual_bitrate
+        content.SampleRate = actual_sr
         content.Analysed = 0      # NOT analyzed — Rekordbox will do it
         # Drag-import parity fields (without these, batch analysis hangs)
         content.HotCueAutoLoad = 'on'

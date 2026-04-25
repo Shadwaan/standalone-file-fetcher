@@ -278,3 +278,26 @@ Source code (`services/rekordbox.py`) updated so future imports include UUIDs an
 - I tried to fix the bug with a single hypothesis (Album/Artist) without verifying it fixed everything. The user had to push for a second analysis test that revealed the fix was incomplete.
 - I should have done the row diff FIRST instead of after the half-fix. Proper diagnostic before proposing a fix.
 - The right pattern: pull a known-good and a known-bad row, diff EVERY field, address every difference. Not "I have a theory, let me apply it and see what happens."
+
+### 11.14 UUID fix worked for Cat 2 (Progressive + Half moon, 12 tracks)
+After applying UUIDs and drag-import-parity fields + deleting broken-path ANLZ files, user re-analyzed 12 tracks (Progressive 8 + Half moon 4) one-after-another and via batch — **all worked, no hangs.** Confirmed via user testing.
+
+### 11.15 Last-mile hang: SampleRate mismatch (2026-04-25 r3)
+The Cat 1 tracks (Horny + 4 Opening) still got slow/stuck on analysis even with UUIDs and parity fields applied. Specifically Horny was the demonstrably stuck one; the Opening tracks were queued behind it.
+
+Row inspection revealed: DB had `SampleRate=44100` (sff hardcoded) but actual MP3 files were 48000 Hz (yt-dlp output sample rate). Cross-checked: Velvet Avenue (works) had `SampleRate=48000` matching its file. The Cat 2 tracks had been corrected by previous-session scripts; the Cat 1 tracks still had the original wrong value.
+
+Section 2.1 of this debug log called the SR-mismatch theory "unproven" because earlier fixes didn't measurably help. **It was actually correct in principle — earlier fixes just didn't address the right tracks AND were applied without UUIDs, so the more visible UUID issue masked the SR effect.** With UUIDs/Album/Artist all correct, SR mismatch becomes the next layer of failure.
+
+Fix applied:
+- Read actual SR from each stuck MP3 via `mutagen.mp3.MP3.info.sample_rate`
+- Update DB SampleRate to match (48000 in all 5 cases)
+- Also set FileNameL (was None on all 5)
+- Source code (`services/rekordbox.py`) updated to read SR/BitRate from file instead of hardcoding 44100/320 going forward
+
+**Awaiting final user test on the 5 Cat 1 tracks (Horny + Opening 4).**
+
+### 11.16 Honest meta-observations 3
+- The previous session said "SR mismatch theory was unproven, may have been pure speculation." That conclusion was reached because their fix didn't help. But their fix didn't help because it was applied in isolation while other layers (UUID, Album/Artist) were also broken. Each layer has to be addressed for the fix at any layer to be observable.
+- Plural failure modes are tricky: fixing one and seeing no improvement doesn't mean the fix was wrong. It means there were multiple causes. Section 2.1 was too quick to dismiss SR.
+- The diagnostic methodology that worked: pick one stuck track, dump every field of its row, compare to a known-good row. Repeat until rows match. Not "apply theory and see if symptom goes away."
