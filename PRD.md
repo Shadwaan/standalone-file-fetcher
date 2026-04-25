@@ -48,6 +48,17 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 - Do NOT write ANLZ files — Rekordbox creates its own when it analyzes
 - **CRITICAL: Set explicit ID** — pyrekordbox does NOT auto-generate IDs. Generate random 9-digit string, verify uniqueness
 - **CRITICAL: Set attributes individually** (NOT kwargs — ArtistName is an association proxy)
+- **CRITICAL: Create proper DjmdAlbum and DjmdArtist rows when needed** — see "Drag-import parity" rule below. Without this, Rekordbox batch analysis hangs on the second track.
+
+### 5a. Drag-import parity rule (CRITICAL — added 2026-04-25)
+**Verified by drag-import diagnostic test:** When a track is dragged into Rekordbox via Windows Explorer, it imports + analyzes instantly with no hangs. When sff inserts the same file via direct DB write with `AlbumID=None`/`ArtistID=None`, batch analysis hangs (specifically: first track works, second hangs — the "2nd-track-hang" pattern).
+
+To match drag-import behavior:
+- **Always create DjmdArtist row** if no existing match — assign explicit 9-10 digit ID, set `rb_data_status=0`, sequential `rb_local_usn`, valid `created_at`/`updated_at`
+- **Always create DjmdAlbum row** if no existing match — same pattern as Artist
+- **Set `ArtistID` and `AlbumID` on DjmdContent** to point at these rows (do NOT leave as None)
+- Do NOT use the "embed artist in Title field" workaround — it leaves AlbumID=None which is what causes the hang
+- Playlist position information lives in `masterPlaylists6.xml`, NOT just master.db. Don't touch that file. When a deleted track is re-added (e.g. via drag-import), Rekordbox cross-references this XML and restores the original TrackNo automatically
 - **CRITICAL: Must set FileType=1, BitRate=320, SampleRate=44100** — without these Rekordbox shows red ? icons
 - **CRITICAL: Set `rb_data_status=0`** and assign sequential `rb_local_usn` — `rb_data_status=1` makes tracks invisible to Rekordbox
 - **CRITICAL: PLAYLISTS ALSO need `rb_data_status=0` + `rb_local_usn`** — if only content has this, playlist shows empty even though rows exist in DjmdSongPlaylist
@@ -180,6 +191,8 @@ This would let us auto-detect actual USB drives regardless of letter, and not ne
 17. Rewrite PPTH paths in ANLZ files when copying to USB (must be USB-relative)
 18. Download into playlist subfolders, not flat in Incoming root
 19. Skip C:, D:, E: in USB detection (system + music + partition)
+20. **NEVER set AlbumID=None or ArtistID=None on DjmdContent** — create proper Album/Artist rows. Verified by drag-import test: missing these makes Rekordbox batch analysis hang.
+21. **Never modify masterPlaylists6.xml** — Rekordbox uses this file for playlist position recovery. Touching it could destroy playlist ordering across the entire library.
 
 ---
 
@@ -192,7 +205,7 @@ This would let us auto-detect actual USB drives regardless of letter, and not ne
 | yt-dlp search crashes on unavailable video | `extract_flat=False` fully extracts each search result | Use `extract_flat=True` for search, only extract on download |
 | YouTube search fails for long titles | Multi-artist + subtitle makes query too long | Try 5 query variants: full, first artist only, title only |
 | Rekordbox import crashes (NULL identity key) | pyrekordbox requires explicit IDs on all tables | Generate random 9-digit string ID, verify uniqueness |
-| Artist creation crashes transaction | DjmdArtist needs explicit ID, flush rolls back everything | Don't create new artists — lookup existing only |
+| ~~Artist creation crashes transaction~~ (SUPERSEDED) | DjmdArtist needs explicit ID, flush rolls back everything | ~~Don't create new artists — lookup existing only~~ Old fix caused worse bug below. New fix: assign explicit 9-10 digit ID + rb_data_status=0 + rb_local_usn, then create the row. |
 | Tracks in Rekordbox show red ? icons | Missing FileType, BitRate, SampleRate fields | Set FileType=1, BitRate=320, SampleRate=44100 |
 | Content invisible in Rekordbox | `rb_data_status=1` means "pending sync" — RB ignores these | Set `rb_data_status=0` and assign sequential `rb_local_usn` |
 | **Playlist shows empty even with songs in DjmdSongPlaylist** | Playlist row had `rb_data_status=1` but content was fine | Set `rb_data_status=0` and `rb_local_usn` on DjmdPlaylist too, not just DjmdContent |
@@ -207,6 +220,8 @@ This would let us auto-detect actual USB drives regardless of letter, and not ne
 | Auto-analyze didn't trigger | Checked `tracks_downloaded > 0` but files existed (skipped download) | (Moot — auto-analyze now disabled) |
 | All files dumped in one folder | No organization by playlist | Download into `Incoming/{PlaylistName}/` subfolders |
 | **E: drive detected as USB** | E: is SSD partition, was matched by drive letter scan | Added E: to SKIP_DRIVES along with C: and D: |
+| **Rekordbox batch analysis hangs on 2nd track for sff-imported tracks** (2026-04-25) | sff was creating DjmdContent rows with `AlbumID=None` and `ArtistID=None`. Verified by drag-import test: same files imported via Explorer drag analyze instantly with no hangs. | Create proper DjmdAlbum + DjmdArtist rows in sff's import path with explicit IDs and rb_data_status=0. Drag-import parity rule (section 5a). |
+| **"Why only after MM force-quit?"** (unresolved theory) | sff was always producing broken metadata, but Rekordbox tolerated small batches. MM (90 tracks) + the now-disabled auto-analyze GUI loop pushed it past tolerance, force-quit corrupted RB process state, hangs became persistent. | Fix the source (sff's missing Album/Artist creation). |
 
 ---
 

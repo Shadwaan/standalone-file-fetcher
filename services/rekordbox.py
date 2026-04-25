@@ -223,6 +223,83 @@ def write_anlz_files(
 
 # ─── Rekordbox DB Import ─────────────────────────────────────────────────────
 
+def _get_or_create_artist(db, tables, name: str) -> str | None:
+    """Look up an artist by name, or create a fresh DjmdArtist row with explicit ID.
+    Returns the artist ID. Without this, Rekordbox batch analysis hangs on the 2nd track."""
+    if not name:
+        return None
+    try:
+        existing = db.session.query(tables.DjmdArtist).filter_by(Name=name).first()
+        if existing:
+            return str(existing.ID)
+
+        import random
+        from sqlalchemy import func as sa_func
+
+        new_id = str(random.randint(1000000000, 9999999999))
+        while db.session.query(tables.DjmdArtist).filter_by(ID=new_id).first():
+            new_id = str(random.randint(1000000000, 9999999999))
+
+        artist = tables.DjmdArtist()
+        artist.ID = new_id
+        artist.Name = name
+        artist.rb_data_status = 0
+        artist.rb_local_data_status = 0
+        artist.rb_local_deleted = 0
+        artist.rb_local_synced = 0
+        artist.usn = None
+        max_usn = db.session.query(sa_func.max(tables.DjmdArtist.rb_local_usn)).scalar() or 0
+        artist.rb_local_usn = max_usn + 1
+        artist.created_at = datetime.now(timezone.utc)
+        artist.updated_at = datetime.now(timezone.utc)
+        db.session.add(artist)
+        db.session.flush()
+        logger.info("Created DjmdArtist: %s (ID=%s)", name, new_id)
+        return new_id
+    except Exception as e:
+        logger.warning("Failed to create artist '%s': %s", name, e)
+        return None
+
+
+def _get_or_create_album(db, tables, name: str, artist_id: str | None = None) -> str | None:
+    """Look up an album by name, or create a fresh DjmdAlbum row with explicit ID."""
+    if not name:
+        return None
+    try:
+        existing = db.session.query(tables.DjmdAlbum).filter_by(Name=name).first()
+        if existing:
+            return str(existing.ID)
+
+        import random
+        from sqlalchemy import func as sa_func
+
+        new_id = str(random.randint(1000000000, 9999999999))
+        while db.session.query(tables.DjmdAlbum).filter_by(ID=new_id).first():
+            new_id = str(random.randint(1000000000, 9999999999))
+
+        album = tables.DjmdAlbum()
+        album.ID = new_id
+        album.Name = name
+        if artist_id:
+            album.AlbumArtistID = artist_id
+        album.rb_data_status = 0
+        album.rb_local_data_status = 0
+        album.rb_local_deleted = 0
+        album.rb_local_synced = 0
+        album.usn = None
+        max_usn = db.session.query(sa_func.max(tables.DjmdAlbum.rb_local_usn)).scalar() or 0
+        album.rb_local_usn = max_usn + 1
+        album.created_at = datetime.now(timezone.utc)
+        album.updated_at = datetime.now(timezone.utc)
+        db.session.add(album)
+        db.session.flush()
+        logger.info("Created DjmdAlbum: %s (ID=%s)", name, new_id)
+        return new_id
+    except Exception as e:
+        logger.warning("Failed to create album '%s': %s", name, e)
+        return None
+
+
 def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
     """Import a track into Rekordbox DB WITHOUT analysis. Rekordbox will analyze it on open."""
     try:
@@ -265,20 +342,20 @@ def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
         content.created_at = datetime.now(timezone.utc)
         content.updated_at = datetime.now(timezone.utc)
 
-        # Lookup existing artist (don't create new)
-        try:
-            artist_obj = db.session.query(tables.DjmdArtist).filter_by(Name=track.artist).first()
-            if artist_obj:
-                content.ArtistID = artist_obj.ID
-            else:
-                content.Title = f"{track.artist} - {track.title}"
-        except Exception:
-            pass
+        # Drag-import parity: create proper Artist + Album rows so Rekordbox can analyze
+        # in batch without hanging. AlbumID=None / ArtistID=None causes the 2nd-track-hang.
+        artist_id = _get_or_create_artist(db, tables, track.artist)
+        if artist_id:
+            content.ArtistID = artist_id
+        album_id = _get_or_create_album(db, tables, track.album, artist_id=artist_id)
+        if album_id:
+            content.AlbumID = album_id
 
         db.session.add(content)
         db.session.commit()
 
-        logger.info("Imported to Rekordbox (unanalyzed): %s (ID=%s)", track.title, new_id)
+        logger.info("Imported to Rekordbox (unanalyzed): %s (ID=%s, ArtistID=%s, AlbumID=%s)",
+                    track.title, new_id, artist_id, album_id)
         return {"status": "imported", "id": new_id}
 
     except Exception as e:
@@ -336,31 +413,19 @@ def import_track(file_path: str, track: TrackInfo, analysis: AnalysisResult) -> 
         content.created_at = datetime.now(timezone.utc)
         content.updated_at = datetime.now(timezone.utc)
 
-        # Set artist — find existing only, don't create new (avoids NULL ID crash)
-        try:
-            artist_obj = db.session.query(tables.DjmdArtist).filter_by(Name=track.artist).first()
-            if artist_obj:
-                content.ArtistID = artist_obj.ID
-            else:
-                # Store artist name in Title as "Artist - Title" for display
-                content.Title = f"{track.artist} - {track.title}"
-        except Exception as e:
-            logger.warning("Failed to lookup artist: %s", e)
+        # Drag-import parity: create proper Artist + Album rows
+        artist_id = _get_or_create_artist(db, tables, track.artist)
+        if artist_id:
+            content.ArtistID = artist_id
+        album_id = _get_or_create_album(db, tables, track.album, artist_id=artist_id)
+        if album_id:
+            content.AlbumID = album_id
 
         # Set key
         if analysis.key_camelot:
             key_obj = db.session.query(tables.DjmdKey).filter_by(ScaleName=analysis.key_camelot).first()
             if key_obj:
                 content.KeyID = key_obj.ID
-
-        # Set album — find existing only, don't create new
-        try:
-            if track.album:
-                album_obj = db.session.query(tables.DjmdAlbum).filter_by(Name=track.album).first()
-                if album_obj:
-                    content.AlbumID = album_obj.ID
-        except Exception as e:
-            logger.warning("Failed to lookup album: %s", e)
 
         db.session.add(content)
         db.session.flush()

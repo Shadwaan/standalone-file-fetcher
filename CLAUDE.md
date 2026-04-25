@@ -144,15 +144,48 @@ if title_lower in fname and first_artist in fname:
 ```
 Never match by title alone.
 
-### 7. Do NOT create new DjmdArtist or DjmdAlbum rows
-Creating new artist/album rows requires explicit IDs and crashes the session on flush.
-Instead: lookup existing artist by name, and if not found, embed artist in Title field:
+### 7. DO create DjmdArtist + DjmdAlbum rows (with explicit IDs) — UPDATED 2026-04-25
+**Old guidance was wrong.** Earlier this said "don't create new artists, embed in Title". That workaround leaves `AlbumID=None`/`ArtistID=None` on DjmdContent, which makes Rekordbox's batch analysis hang on the second sequential track (the "2nd-track-hang" pattern).
+
+**Verified by drag-import test** (2026-04-25): files dragged into Rekordbox via Explorer get proper Album + Artist rows created automatically and analyze instantly with no hangs. Same files inserted by sff with Album/Artist=None hang reproducibly.
+
+**Correct approach: create the rows with explicit IDs, just like DjmdContent.** The old "crashes the session" symptom was caused by missing the explicit ID, not by creating new rows in general.
+
 ```python
-artist_obj = db.session.query(tables.DjmdArtist).filter_by(Name=track.artist).first()
-if artist_obj:
-    content.ArtistID = artist_obj.ID
-else:
-    content.Title = f"{track.artist} - {track.title}"
+import random
+from sqlalchemy import func as sa_func
+from datetime import datetime, timezone
+
+# Helper for any DjmdAlbum/DjmdArtist creation
+def _get_or_create_artist(db, name):
+    if not name:
+        return None
+    existing = db.session.query(tables.DjmdArtist).filter_by(Name=name).first()
+    if existing:
+        return existing.ID
+    new_id = str(random.randint(1000000000, 9999999999))
+    while db.session.query(tables.DjmdArtist).filter_by(ID=new_id).first():
+        new_id = str(random.randint(1000000000, 9999999999))
+    artist = tables.DjmdArtist()
+    artist.ID = new_id
+    artist.Name = name
+    artist.rb_data_status = 0
+    artist.rb_local_data_status = 0
+    artist.rb_local_deleted = 0
+    artist.rb_local_synced = 0
+    artist.usn = None
+    max_usn = db.session.query(sa_func.max(tables.DjmdArtist.rb_local_usn)).scalar() or 0
+    artist.rb_local_usn = max_usn + 1
+    artist.created_at = datetime.now(timezone.utc)
+    artist.updated_at = datetime.now(timezone.utc)
+    db.session.add(artist)
+    db.session.flush()
+    return artist.ID
+
+# Same pattern for DjmdAlbum — set Name, AlbumArtistID (optional), and same rb_* fields
+
+content.ArtistID = _get_or_create_artist(db, track.artist)
+content.AlbumID = _get_or_create_album(db, track.album, artist_id=content.ArtistID)
 ```
 
 ### 8. yt-dlp needs ffmpeg_location (not just PATH)
@@ -243,11 +276,14 @@ This uses the Windows API to check actual drive type, making the detection robus
 - Set `.FolderPath` = forward-slash normalized path (including playlist subfolder)
 - Set `.Title`, `.FileNameL`, `.FileSize`
 - Set `.FileType` = 1, `.BitRate` = 320, `.SampleRate` = 44100
+- **Set `.ArtistID`** to a real DjmdArtist row (use `_get_or_create_artist`)
+- **Set `.AlbumID`** to a real DjmdAlbum row (use `_get_or_create_album`)
 - Set `.Analysed` = 0 (Rekordbox will analyze)
 - Do NOT set BPM, KeyID, or AnalysisDataPath — Rekordbox handles these
 - Do NOT write ANLZ files — Rekordbox creates its own
 - Set `.rb_data_status` = 0, assign sequential `.rb_local_usn`
 - Set `.updated_at` = `datetime.now(timezone.utc)` (NOT isoformat string)
+- **Without ArtistID/AlbumID set, Rekordbox batch analysis hangs on the 2nd track.** Verified 2026-04-25.
 
 ### DjmdPlaylist Creation
 - Set `.ID` = random 10-digit string (verify unique)
@@ -263,6 +299,23 @@ This uses the Windows API to check actual drive type, making the detection robus
 - Set `.PlaylistID`, `.ContentID`, `.TrackNo` (1-based)
 - `.rb_data_status` = 1 is OK here (that's how working playlists look)
 - `.rb_local_usn` = 0 is fine
+
+### Files in `%APPDATA%\Pioneer\rekordbox\` — what to touch and what NOT to touch
+
+**DO NOT TOUCH:**
+- `master.db` — write only via pyrekordbox transactions, never edit raw
+- `master.db-wal`, `master.db-shm` — SQLite WAL/shared memory; pyrekordbox manages these
+- `share/USBANLZ/` — Rekordbox's analysis output (BPM, key, beat grid, waveforms). Deleting these throws away analysis work.
+- `share/Artwork/` — artwork cache; safe to delete contents but Rekordbox will re-extract
+- `masterPlaylists6.xml` — **Rekordbox stores playlist position memory here.** When a track is removed from master.db and re-added (e.g. via drag-import), Rekordbox cross-references this XML and restores its original TrackNo automatically. Do not delete or modify this file from sff. Verified 2026-04-25 by drag-import test.
+- `automixPlaylist6.xml` — Auto-mix queue state
+- `master.backup*.db` and `master.db.bak.*` — backups; preserve these
+
+**SAFE TO RENAME/DELETE for cache reset (Rekordbox closed first):**
+- `networkAnalyze6.db` — internal analysis cache; regenerated on next launch
+- `ExtData.edb`, `ExtData.backup.edb` — extended data cache
+- `datafile.edb`, `datafile.backup.edb` — datafile cache
+- `Crashes/`, `Corrupt/` — diagnostic dumps
 
 ### WAL Flush (DOUBLE — after ALL DB operations)
 ```python
