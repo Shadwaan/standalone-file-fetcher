@@ -421,15 +421,29 @@ def import_track(file_path: str, track: TrackInfo, analysis: AnalysisResult) -> 
         while db.session.query(tables.DjmdContent).filter_by(ID=new_id).first():
             new_id = str(random.randint(100000000, 999999999))
 
+        # Read actual SampleRate/BitRate from file (yt-dlp output is 48000Hz, hardcoding 44100 caused hangs)
+        actual_sr = 44100
+        actual_bitrate = 320
+        try:
+            from mutagen.mp3 import MP3
+            audio = MP3(file_path)
+            actual_sr = audio.info.sample_rate
+            if audio.info.bitrate:
+                actual_bitrate = audio.info.bitrate // 1000
+        except Exception:
+            pass
+
+        import uuid as _uuid
         content = tables.DjmdContent()
         content.ID = new_id
+        content.UUID = str(_uuid.uuid4())  # CRITICAL for ANLZ path
         content.FolderPath = normalized
         content.Title = track.title
         content.FileNameL = Path(file_path).name
         content.FileSize = Path(file_path).stat().st_size if Path(file_path).exists() else 0
         content.BPM = int(round(analysis.bpm * 100))
-        content.BitRate = 320
-        content.SampleRate = 44100
+        content.BitRate = actual_bitrate
+        content.SampleRate = actual_sr
         content.FileType = 1  # 1 = MP3
         content.Analysed = 105
         content.rb_data_status = 0
