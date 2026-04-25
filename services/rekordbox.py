@@ -240,8 +240,10 @@ def _get_or_create_artist(db, tables, name: str) -> str | None:
         while db.session.query(tables.DjmdArtist).filter_by(ID=new_id).first():
             new_id = str(random.randint(1000000000, 9999999999))
 
+        import uuid as _uuid
         artist = tables.DjmdArtist()
         artist.ID = new_id
+        artist.UUID = str(_uuid.uuid4())
         artist.Name = name
         artist.rb_data_status = 0
         artist.rb_local_data_status = 0
@@ -277,8 +279,10 @@ def _get_or_create_album(db, tables, name: str, artist_id: str | None = None) ->
         while db.session.query(tables.DjmdAlbum).filter_by(ID=new_id).first():
             new_id = str(random.randint(1000000000, 9999999999))
 
+        import uuid as _uuid
         album = tables.DjmdAlbum()
         album.ID = new_id
+        album.UUID = str(_uuid.uuid4())
         album.Name = name
         if artist_id:
             album.AlbumArtistID = artist_id
@@ -322,8 +326,12 @@ def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
         while db.session.query(tables.DjmdContent).filter_by(ID=new_id).first():
             new_id = str(random.randint(100000000, 999999999))
 
+        import uuid as _uuid
+        today = datetime.now().strftime('%Y-%m-%d')
+
         content = tables.DjmdContent()
         content.ID = new_id
+        content.UUID = str(_uuid.uuid4())  # CRITICAL: Rekordbox uses UUID to build ANLZ paths
         content.FolderPath = normalized
         content.Title = track.title
         content.FileNameL = Path(file_path).name
@@ -332,6 +340,16 @@ def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
         content.BitRate = 320
         content.SampleRate = 44100
         content.Analysed = 0      # NOT analyzed — Rekordbox will do it
+        # Drag-import parity fields (without these, batch analysis hangs)
+        content.HotCueAutoLoad = 'on'
+        content.DeliveryControl = 'on'
+        content.StockDate = today
+        content.DateCreated = today
+        content.ColorID = '0'
+        content.DJPlayCount = 0
+        content.DiscNo = 0
+        content.Rating = 0
+        content.TrackNo = 0
         content.rb_data_status = 0
         content.rb_local_data_status = 0
         content.rb_local_deleted = 0
@@ -354,8 +372,8 @@ def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
         db.session.add(content)
         db.session.commit()
 
-        logger.info("Imported to Rekordbox (unanalyzed): %s (ID=%s, ArtistID=%s, AlbumID=%s)",
-                    track.title, new_id, artist_id, album_id)
+        logger.info("Imported to Rekordbox (unanalyzed): %s (ID=%s, UUID=%s, ArtistID=%s, AlbumID=%s)",
+                    track.title, new_id, content.UUID, artist_id, album_id)
         return {"status": "imported", "id": new_id}
 
     except Exception as e:

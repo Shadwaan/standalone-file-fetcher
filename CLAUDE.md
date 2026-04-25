@@ -273,17 +273,24 @@ This uses the Windows API to check actual drive type, making the detection robus
 
 ### DjmdContent Creation (Unanalyzed Import)
 - Set `.ID` = random 9-digit string (verify unique)
+- **Set `.UUID` = `str(uuid.uuid4())`** — CRITICAL. Rekordbox uses this to build the ANLZ path `/PIONEER/USBANLZ/{uuid[:3]}/{uuid[3:]}/ANLZ0000.DAT`. Without it, Rekordbox writes to broken sentinel path `/PIONEER/USBANLZ///ANLZ0018.DAT` and batch analysis hangs.
 - Set `.FolderPath` = forward-slash normalized path (including playlist subfolder)
 - Set `.Title`, `.FileNameL`, `.FileSize`
 - Set `.FileType` = 1, `.BitRate` = 320, `.SampleRate` = 44100
-- **Set `.ArtistID`** to a real DjmdArtist row (use `_get_or_create_artist`)
-- **Set `.AlbumID`** to a real DjmdAlbum row (use `_get_or_create_album`)
+- **Set `.ArtistID`** to a real DjmdArtist row (use `_get_or_create_artist` which sets UUID on artist too)
+- **Set `.AlbumID`** to a real DjmdAlbum row (use `_get_or_create_album` which sets UUID on album too)
+- **Drag-import parity fields** (without these, batch analysis hangs):
+  - `.HotCueAutoLoad = 'on'`
+  - `.DeliveryControl = 'on'`
+  - `.StockDate = today_yyyy_mm_dd`
+  - `.DateCreated = today_yyyy_mm_dd`
+  - `.ColorID = '0'`, `.DJPlayCount = 0`, `.DiscNo = 0`, `.Rating = 0`, `.TrackNo = 0`
 - Set `.Analysed` = 0 (Rekordbox will analyze)
 - Do NOT set BPM, KeyID, or AnalysisDataPath — Rekordbox handles these
 - Do NOT write ANLZ files — Rekordbox creates its own
 - Set `.rb_data_status` = 0, assign sequential `.rb_local_usn`
 - Set `.updated_at` = `datetime.now(timezone.utc)` (NOT isoformat string)
-- **Without ArtistID/AlbumID set, Rekordbox batch analysis hangs on the 2nd track.** Verified 2026-04-25.
+- **Without UUID + Artist/Album rows + drag-import parity fields, Rekordbox batch analysis hangs on the 2nd track.** Verified 2026-04-25 by row-diff between drag-imported (works) and sff-imported (hangs) track.
 
 ### DjmdPlaylist Creation
 - Set `.ID` = random 10-digit string (verify unique)

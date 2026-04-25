@@ -237,3 +237,44 @@ Restore from either if anything goes wrong.
 - I made the same kind of confident-but-wrong call that this debug log warns against — proposed cache reset based on the prior session's hypothesis without re-reading the diagnostic evidence first. The user had to point me to the debug log they'd already had me write.
 - I read master.db while Rekordbox was running and presented the result as authoritative when it wasn't (Rekordbox's WAL had the actual current state). The user correctly called this out.
 - Drag-import tests give clean signal because they isolate variables. We should have done this test in the previous session instead of file re-encoding and DB hygiene work that didn't address the actual cause.
+
+### 11.10 Migration applied (Artist/Album only) — fix was incomplete
+Applied migration to all 100 sff-imported tracks: added ArtistID + AlbumID by reading ID3 tags and creating proper DjmdArtist/DjmdAlbum rows with explicit IDs.
+
+**Outcome: incomplete.** User analyzed Supernova - I Can't Do Without You first; it analyzed (slowly, not instant). User then tried Supernova - Discomagic; **it hung.** The 2nd-track-hang persisted even with proper Artist/Album rows.
+
+User correctly pointed out the slow first analysis was itself a red flag — drag-imported tracks analyze instantly.
+
+### 11.11 DB row diff revealed the REAL cause: missing UUID + ~15 other fields
+Compared a drag-imported (working, instant analysis) row vs a migrated sff (slow + hang) row field-by-field.
+
+**The smoking gun: `UUID = None` on sff vs proper UUID on drag-imported.** Rekordbox uses the content UUID to build the ANLZ analysis file path:
+- Drag (works): `AnalysisDataPath = '/PIONEER/USBANLZ/3c9/680ac-60c4-.../ANLZ0000.DAT'` (starts with first 3 chars of UUID)
+- sff (hangs): `AnalysisDataPath = '/PIONEER/USBANLZ///ANLZ0018.DAT'` (TRIPLE SLASHES — empty UUID slot)
+
+This is exactly the broken sentinel path warned about in section 2.2. Same issue with `ImagePath = '/PIONEER/Artwork///artwork.jpg'`. When Rekordbox can't find the proper UUID-based path, it falls back to this empty-segment path. Multiple tracks collide on the same broken path. Batch analysis tries to read/write to it, gets confused, hangs.
+
+Other missing fields drag-import sets that sff didn't:
+- `HotCueAutoLoad = 'on'` (functional — controls auto-load behavior)
+- `DeliveryControl = 'on'`
+- `StockDate`, `DateCreated`
+- `ColorID = '0'`, `DJPlayCount = 0`, `DiscNo = 0`, `Rating = 0`, `TrackNo = 0`
+- `MasterDBID`, `MasterSongID`, `rb_file_id`, `DeviceID` (rekordbox-internal IDs — may not be necessary)
+
+DjmdAlbum rows also need UUIDs (drag has them, sff didn't).
+
+### 11.12 Targeted UUID fix applied to ONLY the 2 still-unanalyzed tracks
+User explicitly directed: do NOT migrate the 100 already-analyzed tracks. Their existing ANLZ files work even with broken paths because they were already created. Re-running with UUIDs would force regeneration.
+
+Fixed only:
+- Supernova - Discomagic (Opening @ 16) — added UUID + drag-import-parity fields
+- Supernova, Mr. V - Change (Half moon @ 43) — same
+
+Source code (`services/rekordbox.py`) updated so future imports include UUIDs and parity fields automatically. No migration of existing 100 tracks.
+
+**Awaiting user test to confirm.**
+
+### 11.13 Honest meta-observations 2
+- I tried to fix the bug with a single hypothesis (Album/Artist) without verifying it fixed everything. The user had to push for a second analysis test that revealed the fix was incomplete.
+- I should have done the row diff FIRST instead of after the half-fix. Proper diagnostic before proposing a fix.
+- The right pattern: pull a known-good and a known-bad row, diff EVERY field, address every difference. Not "I have a theory, let me apply it and see what happens."

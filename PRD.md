@@ -50,15 +50,19 @@ A standalone application that bridges Spotify playlists to Rekordbox and Traktor
 - **CRITICAL: Set attributes individually** (NOT kwargs — ArtistName is an association proxy)
 - **CRITICAL: Create proper DjmdAlbum and DjmdArtist rows when needed** — see "Drag-import parity" rule below. Without this, Rekordbox batch analysis hangs on the second track.
 
-### 5a. Drag-import parity rule (CRITICAL — added 2026-04-25)
-**Verified by drag-import diagnostic test:** When a track is dragged into Rekordbox via Windows Explorer, it imports + analyzes instantly with no hangs. When sff inserts the same file via direct DB write with `AlbumID=None`/`ArtistID=None`, batch analysis hangs (specifically: first track works, second hangs — the "2nd-track-hang" pattern).
+### 5a. Drag-import parity rule (CRITICAL — updated 2026-04-25 r2)
+**Verified by DB row diff between drag-imported (works) and sff-imported (hangs) tracks.** sff was missing many fields that drag-import sets. The CRITICAL ones:
 
-To match drag-import behavior:
-- **Always create DjmdArtist row** if no existing match — assign explicit 9-10 digit ID, set `rb_data_status=0`, sequential `rb_local_usn`, valid `created_at`/`updated_at`
-- **Always create DjmdAlbum row** if no existing match — same pattern as Artist
-- **Set `ArtistID` and `AlbumID` on DjmdContent** to point at these rows (do NOT leave as None)
-- Do NOT use the "embed artist in Title field" workaround — it leaves AlbumID=None which is what causes the hang
-- Playlist position information lives in `masterPlaylists6.xml`, NOT just master.db. Don't touch that file. When a deleted track is re-added (e.g. via drag-import), Rekordbox cross-references this XML and restores the original TrackNo automatically
+1. **`UUID`** — must be set with `str(uuid.uuid4())`. Rekordbox uses this to build the ANLZ analysis file path: `/PIONEER/USBANLZ/{uuid[:3]}/{uuid[3:]}/ANLZ0000.DAT`. Without UUID, Rekordbox falls back to the broken sentinel path `/PIONEER/USBANLZ///ANLZ0018.DAT` (triple slashes — empty UUID). Multiple tracks collide on this path, causing batch analysis hangs and wrong artwork.
+2. **`ArtistID`** must point to a real DjmdArtist row (use `_get_or_create_artist`, which now also sets UUID on the artist row)
+3. **`AlbumID`** must point to a real DjmdAlbum row (use `_get_or_create_album`, which now also sets UUID on the album row)
+4. **`HotCueAutoLoad='on'`**, **`DeliveryControl='on'`**, **`StockDate`**, **`DateCreated`**, **`ColorID='0'`**, **`DJPlayCount=0`**, **`DiscNo=0`**, **`Rating=0`**, **`TrackNo=0`** — drag-import sets these; sff was leaving them None. Some are functional (HotCueAutoLoad), some are display defaults.
+
+Without these, sff-imported tracks:
+- Analyze SLOWLY on first attempt (Rekordbox struggles to write the broken ANLZ path)
+- HANG on second sequential analysis (path collision or broken state from first analysis)
+
+Playlist position information lives in `masterPlaylists6.xml`, NOT just master.db. Don't touch that file. When a deleted track is re-added (e.g. via drag-import), Rekordbox cross-references this XML and restores the original TrackNo automatically.
 - **CRITICAL: Must set FileType=1, BitRate=320, SampleRate=44100** — without these Rekordbox shows red ? icons
 - **CRITICAL: Set `rb_data_status=0`** and assign sequential `rb_local_usn` — `rb_data_status=1` makes tracks invisible to Rekordbox
 - **CRITICAL: PLAYLISTS ALSO need `rb_data_status=0` + `rb_local_usn`** — if only content has this, playlist shows empty even though rows exist in DjmdSongPlaylist
@@ -220,7 +224,7 @@ This would let us auto-detect actual USB drives regardless of letter, and not ne
 | Auto-analyze didn't trigger | Checked `tracks_downloaded > 0` but files existed (skipped download) | (Moot — auto-analyze now disabled) |
 | All files dumped in one folder | No organization by playlist | Download into `Incoming/{PlaylistName}/` subfolders |
 | **E: drive detected as USB** | E: is SSD partition, was matched by drive letter scan | Added E: to SKIP_DRIVES along with C: and D: |
-| **Rekordbox batch analysis hangs on 2nd track for sff-imported tracks** (2026-04-25) | sff was creating DjmdContent rows with `AlbumID=None` and `ArtistID=None`. Verified by drag-import test: same files imported via Explorer drag analyze instantly with no hangs. | Create proper DjmdAlbum + DjmdArtist rows in sff's import path with explicit IDs and rb_data_status=0. Drag-import parity rule (section 5a). |
+| **Rekordbox batch analysis hangs on 2nd track for sff-imported tracks** (2026-04-25) | First diagnosis (incomplete): sff was creating rows with `AlbumID=None`/`ArtistID=None`. **Real cause (after row diff with drag-imported track): sff was ALSO missing `UUID` on DjmdContent and DjmdAlbum.** Rekordbox uses UUID to build the ANLZ analysis path. Without UUID, Rekordbox falls back to broken sentinel path `/PIONEER/USBANLZ///ANLZ0018.DAT`, multiple tracks collide on it, batch analysis hangs. | (1) Create proper DjmdAlbum + DjmdArtist rows. (2) Generate `UUID = uuid.uuid4()` on every new DjmdContent, DjmdArtist, DjmdAlbum row. (3) Set drag-import-parity fields: HotCueAutoLoad='on', DeliveryControl='on', StockDate, DateCreated, ColorID='0', etc. |
 | **"Why only after MM force-quit?"** (unresolved theory) | sff was always producing broken metadata, but Rekordbox tolerated small batches. MM (90 tracks) + the now-disabled auto-analyze GUI loop pushed it past tolerance, force-quit corrupted RB process state, hangs became persistent. | Fix the source (sff's missing Album/Artist creation). |
 
 ---
