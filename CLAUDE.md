@@ -293,12 +293,16 @@ This uses the Windows API to check actual drive type, making the detection robus
 - Set `.updated_at` = `datetime.now(timezone.utc)` (NOT isoformat string)
 - **Without UUID + Artist/Album rows + drag-import parity fields, Rekordbox batch analysis hangs on the 2nd track.** Verified 2026-04-25 by row-diff between drag-imported (works) and sff-imported (hangs) track.
 
-### DjmdPlaylist Creation
-- Set `.ID` = random 10-digit string (verify unique)
-- **Set `.UUID` = `str(uuid.uuid4())`** — CRITICAL. Without UUID, the playlist will appear empty in Rekordbox UI even when DjmdSongPlaylist + DjmdContent rows are all correct. Verified 2026-04-25 r5 via NuJungle empty-playlist bug.
+### DjmdPlaylist Creation (CRITICAL — three things must all be done)
+- **`.ID` = `str(random.randint(1, (2**32) - 1))`** (32-bit unsigned). NOT modulo `10^10`. Rekordbox stores playlist IDs as 32-bit ints in `masterPlaylists6.xml`. IDs > 2^32-1 (9+ hex chars) are unparseable by Rekordbox and the playlist appears empty.
+- **`.UUID` = `str(uuid.uuid4())`** — without UUID, playlist appears empty.
 - Set `.Name`, `.Seq` = 0 (top), bump existing Seq values up
 - Set `.Attribute` = 0, `.ParentID` = 'root'
-- **CRITICAL: Set `.rb_data_status` = 0** (not 1 — that's what broke Moroccan Moonlight)
+- Set `.rb_data_status` = 0 (not 1)
+- Set `.rb_local_usn` = next sequential, `.usn` = None
+- **After commit, register the playlist in `%APPDATA%/Pioneer/rekordbox/masterPlaylists6.xml`** by adding a `<NODE Id="{HEX}" ParentId="0" Attribute="0" Timestamp="{UNIX_MS}" Lib_Type="0" CheckType="0"/>` entry under the `<PLAYLISTS>` element. Without this, Rekordbox doesn't know the playlist exists. Use `_register_playlist_in_xml(playlist_id)` helper in services/rekordbox.py.
+
+All three must be done. Missing any one results in an empty-looking playlist in the UI. Verified 2026-04-25 r5 via NuJungle saga (DEBUG_LOG section 12).
 - Set `.rb_local_usn` = max+1 from DjmdPlaylist USNs
 - Set `.usn` = None (not 0, None)
 - Set `.rb_local_data_status` = 0, `.rb_local_deleted` = 0, `.rb_local_synced` = 0

@@ -301,3 +301,81 @@ Fix applied:
 - The previous session said "SR mismatch theory was unproven, may have been pure speculation." That conclusion was reached because their fix didn't help. But their fix didn't help because it was applied in isolation while other layers (UUID, Album/Artist) were also broken. Each layer has to be addressed for the fix at any layer to be observable.
 - Plural failure modes are tricky: fixing one and seeing no improvement doesn't mean the fix was wrong. It means there were multiple causes. Section 2.1 was too quick to dismiss SR.
 - The diagnostic methodology that worked: pick one stuck track, dump every field of its row, compare to a known-good row. Repeat until rows match. Not "apply theory and see if symptom goes away."
+
+---
+
+## 12. Session 2026-04-25 r5: NuJungle empty-playlist saga (the same MM bug, finally diagnosed)
+
+User created a fresh FF playlist "NuJungle" in Spotify, ran sff sync. 4 tracks downloaded successfully. In Rekordbox, the NuJungle playlist appeared in the sidebar but showed **0 tracks** even though master.db had all 4 song-playlist rows + content rows correctly populated.
+
+This is the same symptom Moroccan Moonlight had earlier. MM was eventually deleted entirely (per section 3.6) without us actually identifying the root cause — we just patched `rb_data_status=0` on the playlist row at the time and it appeared to work, then MM was purged. So the underlying bug never got fixed in sff. New playlists kept hitting the same wall.
+
+This session methodically peeled the onion until we found it.
+
+### 12.1 Failed attempts (what didn't fix it)
+
+**Attempt 1: Patch `rb_data_status` on the playlist row.**
+NuJungle's playlist row already had `rb_data_status=0` from our earlier fix in services/rekordbox.py. Not the bug.
+
+**Attempt 2: Add `UUID` to DjmdSongPlaylist rows.**
+Diagnosis: NuJungle's 4 song rows had UUID=None. Working playlists' song rows had UUIDs set on most/all entries. Patched the 4 song rows with `uuid.uuid4()`, set `rb_data_status=0` and sequential `rb_local_usn`, set `usn=None`. **Outcome: NuJungle still empty.** Source code updated regardless (it's still required, just not sufficient).
+
+**Attempt 3: Add `UUID` to DjmdPlaylist row.**
+Diagnosis: comparing NuJungle's playlist row to Progressive's, `UUID` was None on NuJungle but set on Progressive. Patched NuJungle's playlist UUID. **Outcome: NuJungle still empty.** Source code updated regardless.
+
+**Attempt 4: Register NuJungle in masterPlaylists6.xml.**
+Diagnosis: Rekordbox stores a list of playlist NODE entries in `%APPDATA%/Pioneer/rekordbox/masterPlaylists6.xml`, keyed by hex-encoded playlist ID. All working playlists (Opening, Progressive, Half moon, Oldies) had their hex IDs registered there. NuJungle's ID `7285162879` (hex `1B23AC37F`) was missing. Added the NODE entry mirroring Progressive's format. **Outcome: NuJungle still empty.**
+
+### 12.2 The actual root cause: 32-bit playlist ID limit
+
+The discriminator between working and broken playlists wasn't just XML registration — it was the SHAPE of the ID:
+
+| Playlist | ID (decimal) | ID (hex) | Hex chars | Works? |
+|---|---|---|---|---|
+| Opening | 1125574800 | 4316E890 | 8 | ✓ |
+| Progressive | 2821015958 | A8254996 | 8 | ✓ |
+| Oldies | 1294837403 | 4D2DA69B | 8 | ✓ |
+| Half moon | 3533923378 | D2A36432 | 8 | ✓ |
+| **NuJungle (orig)** | **7285162879** | **1B23AC37F** | **9** | **✗** |
+
+NuJungle's ID exceeded 2^32 - 1 (4,294,967,295). Rekordbox stores playlist IDs as **32-bit unsigned integers** in the `masterPlaylists6.xml` registry. A 9-hex-char ID can't be parsed as a 32-bit value, so even though we registered it, Rekordbox couldn't match the XML entry to the master.db row, treating the playlist as if it didn't exist.
+
+Source of the problem: sff was generating playlist IDs via:
+```python
+playlist.ID = str(abs(hash(f'sff_{playlist_name}')) % (10 ** 10))
+```
+That produces values up to 9,999,999,999 — way above the 32-bit max. Most outputs happen to fit (most random ints below 4.3B), but ~57% of generated IDs exceed 32-bit. NuJungle hit one of those.
+
+### 12.3 The fix that worked
+
+1. **Regenerate NuJungle's playlist ID** to a 32-bit value (`random.randint(1, 2**32 - 1)`) — it became `2035588751` (hex `79549E8F`).
+2. **Recreate the 4 song-playlist rows** with the new PlaylistID, preserving original UUIDs and TrackNos (since you can't UPDATE a primary key in SQLAlchemy without breaking foreign-key references, we did delete-and-recreate).
+3. **Update masterPlaylists6.xml** — remove the orphan `1B23AC37F` entry, add a fresh `79549E8F` entry.
+4. **Double WAL flush.**
+
+User opened Rekordbox, NuJungle showed 4 tracks, analyzed them, closed Rekordbox cleanly, reopened, **state persisted**. Confirmed working.
+
+### 12.4 Source-code prevention so this never recurs
+
+`services/rekordbox.py` `find_or_create_playlist`:
+- ID generation now uses `random.randint(1, (2**32) - 1)` — guaranteed to fit in 32-bit
+- Sets `UUID = uuid.uuid4()` on the playlist row
+- Sets `rb_data_status=0`, sequential `rb_local_usn`
+- Calls a new helper `_register_playlist_in_xml(playlist_id)` which:
+  - Opens `%APPDATA%/Pioneer/rekordbox/masterPlaylists6.xml`
+  - Adds a `<NODE Id="HEX" ParentId="0" Attribute="0" Timestamp="MS" Lib_Type="0" CheckType="0"/>` entry
+  - Writes back
+
+The DjmdSongPlaylist row creation (`add_track_to_playlist`) was already updated in r4 to set UUID + `rb_data_status=0` + sequential `rb_local_usn`.
+
+**Future sff syncs will not produce this bug.** Every layer is addressed:
+- DjmdContent: explicit ID + UUID + Album/Artist relations + drag-import-parity fields + actual SR/BR
+- DjmdArtist / DjmdAlbum: explicit ID + UUID + rb_data_status=0
+- DjmdPlaylist: 32-bit ID + UUID + rb_data_status=0 + masterPlaylists6.xml registration
+- DjmdSongPlaylist: UUID + rb_data_status=0 + sequential rb_local_usn
+
+### 12.5 Honest meta-observations 4
+- I should have done the field-by-field row diff between NuJungle and a working playlist on attempt 1. Instead I tried 3 partial fixes based on theories before doing the proper diagnostic.
+- Earlier MM debugging (sections 3.6 + section 11) never identified this — we deleted MM rather than properly diagnosed it. That left the bug in the codebase. **Lesson: don't delete a broken case until you've understood why it's broken.** Otherwise the next case hits the same wall.
+- The 32-bit playlist ID constraint is documented nowhere obvious. Empirical proof: ALL existing-and-working playlists in this user's library have ≤8-hex-char IDs. The hash-mod-10^10 ID generator was a latent bug that worked for ~43% of generated names.
+- masterPlaylists6.xml is a real registry, not a cache. Earlier debug log warned "don't modify masterPlaylists6.xml" — that warning was wrong (or at least over-broad). It needs to be modified when adding new playlists. We should NOT modify entries that are already there (they encode track position memory), but appending a new NODE for a new playlist is safe and required.

@@ -515,8 +515,18 @@ def _update_content_analysis(content, analysis: AnalysisResult, db) -> None:
 # ─── Rekordbox Playlist Management ──────────────────────────────────────────
 
 def find_or_create_playlist(playlist_name: str) -> str | None:
-    """Find existing or create new Rekordbox playlist. Returns playlist ID."""
+    """Find existing or create new Rekordbox playlist. Returns playlist ID.
+
+    CRITICAL: New playlists must:
+    1. Have UUID set (otherwise appear empty in Rekordbox UI)
+    2. Have a 32-bit ID (≤ 2^32 - 1) — Rekordbox stores playlist IDs as 32-bit
+       integers in masterPlaylists6.xml. IDs > 32-bit produce 9-hex-char entries
+       which Rekordbox can't read, so the playlist is hidden.
+    3. Be registered in masterPlaylists6.xml as a NODE entry. Without that,
+       Rekordbox doesn't know the playlist exists even if it's in master.db.
+    """
     try:
+        import random
         from pyrekordbox import Rekordbox6Database
         from pyrekordbox.db6 import tables
 
@@ -532,9 +542,14 @@ def find_or_create_playlist(playlist_name: str) -> str | None:
             if pl.Seq is not None:
                 pl.Seq = (pl.Seq or 0) + 1
 
+        # 32-bit ID (must fit in unsigned 32-bit so hex is ≤ 8 chars)
+        new_id = str(random.randint(1, (2**32) - 1))
+        while db.session.query(tables.DjmdPlaylist).filter_by(ID=new_id).first():
+            new_id = str(random.randint(1, (2**32) - 1))
+
         import uuid as _uuid
         playlist = tables.DjmdPlaylist()
-        playlist.ID = str(abs(hash(f'sff_{playlist_name}')) % (10 ** 10))
+        playlist.ID = new_id
         playlist.UUID = str(_uuid.uuid4())  # CRITICAL: without UUID, playlist appears empty in Rekordbox UI
         playlist.Name = playlist_name
         playlist.Seq = 0
@@ -553,12 +568,64 @@ def find_or_create_playlist(playlist_name: str) -> str | None:
         db.session.add(playlist)
         db.session.commit()
 
-        logger.info("Created Rekordbox playlist: %s (Seq=0, top)", playlist_name)
-        return str(playlist.ID)
+        # Register in masterPlaylists6.xml — without this, Rekordbox doesn't
+        # know the playlist exists even though it's in master.db
+        _register_playlist_in_xml(new_id)
+
+        logger.info("Created Rekordbox playlist: %s (Seq=0, top, ID=%s)", playlist_name, new_id)
+        return new_id
 
     except Exception as e:
         logger.error("Failed to find/create Rekordbox playlist '%s': %s", playlist_name, e)
         return None
+
+
+def _register_playlist_in_xml(playlist_id: str):
+    """Add a NODE entry to masterPlaylists6.xml for a new playlist.
+    Rekordbox uses this XML as a registry of which playlists exist.
+    Without an entry here, Rekordbox shows the playlist as empty in the UI."""
+    try:
+        import os
+        import xml.etree.ElementTree as ET
+        from datetime import datetime as _dt
+
+        xml_path = os.path.join(
+            os.environ.get("APPDATA", ""),
+            "Pioneer", "rekordbox", "masterPlaylists6.xml"
+        )
+        if not os.path.exists(xml_path):
+            logger.warning("masterPlaylists6.xml not found at %s — playlist may appear empty in UI", xml_path)
+            return
+
+        # Encode playlist ID as uppercase hex (without 0x prefix)
+        id_hex = hex(int(playlist_id))[2:].upper()
+        timestamp_ms = int(_dt.now().timestamp() * 1000)
+
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        playlists_node = root.find("PLAYLISTS")
+        if playlists_node is None:
+            logger.warning("PLAYLISTS node not found in masterPlaylists6.xml")
+            return
+
+        # Skip if already registered
+        for n in playlists_node.findall("NODE"):
+            if n.get("Id") == id_hex:
+                return
+
+        ET.SubElement(playlists_node, "NODE", {
+            "Id": id_hex,
+            "ParentId": "0",
+            "Attribute": "0",
+            "Timestamp": str(timestamp_ms),
+            "Lib_Type": "0",
+            "CheckType": "0",
+        })
+        tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
+        logger.info("Registered playlist ID %s (hex %s) in masterPlaylists6.xml", playlist_id, id_hex)
+
+    except Exception as e:
+        logger.error("Failed to register playlist in masterPlaylists6.xml: %s", e)
 
 
 def add_track_to_playlist(playlist_id: str, content_id: str, track_no: int) -> bool:
