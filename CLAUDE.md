@@ -304,9 +304,10 @@ This uses the Windows API to check actual drive type, making the detection robus
 
 ### DjmdSongPlaylist (songs within playlist)
 - Set `.ID` = random 10-digit string
+- **Set `.UUID` = `str(uuid.uuid4())`** — CRITICAL. Rekordbox filters out song rows without UUIDs (the entire playlist appears empty in UI even though playlist row + content rows are correct). Verified 2026-04-25 r4 via NuJungle empty-playlist bug.
 - Set `.PlaylistID`, `.ContentID`, `.TrackNo` (1-based)
-- `.rb_data_status` = 1 is OK here (that's how working playlists look)
-- `.rb_local_usn` = 0 is fine
+- Set `.rb_data_status` = 0 (NOT 1 — earlier guidance was wrong)
+- Set `.usn = None` and `.rb_local_usn` = next sequential from `func.max(DjmdSongPlaylist.rb_local_usn)` + 1
 
 ### Files in `%APPDATA%\Pioneer\rekordbox\` — what to touch and what NOT to touch
 

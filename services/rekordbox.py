@@ -577,17 +577,22 @@ def add_track_to_playlist(playlist_id: str, content_id: str, track_no: int) -> b
             db.session.commit()
             return True
 
+        import uuid as _uuid
+        from sqlalchemy import func as sa_func
+
         song = tables.DjmdSongPlaylist()
         song.ID = str(abs(hash(f'sff_{playlist_id}_{content_id}_{track_no}')) % (10 ** 10))
+        song.UUID = str(_uuid.uuid4())  # CRITICAL: Rekordbox filters out song rows without UUID
         song.PlaylistID = playlist_id
         song.ContentID = content_id
         song.TrackNo = track_no
-        song.rb_data_status = 1
+        song.rb_data_status = 0
         song.rb_local_data_status = 0
         song.rb_local_deleted = 0
         song.rb_local_synced = 0
-        song.usn = 0
-        song.rb_local_usn = 0
+        song.usn = None
+        max_usn = db.session.query(sa_func.max(tables.DjmdSongPlaylist.rb_local_usn)).scalar() or 0
+        song.rb_local_usn = max_usn + 1
         song.created_at = datetime.now(timezone.utc)
         song.updated_at = datetime.now(timezone.utc)
         db.session.add(song)
