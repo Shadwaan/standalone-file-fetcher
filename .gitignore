@@ -1,6 +1,13 @@
+# Runtime / user data (anywhere in the tree)
 .env
-.spotify_cache
+.spotify_cache*
 sync_state.json
+app_config.json
+.venv/
+
+# Python build artifacts
 __pycache__/
 *.pyc
-.venv/
+
+# macOS
+.DS_Store
