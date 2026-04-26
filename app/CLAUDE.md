@@ -532,9 +532,36 @@ Server hosts on `http://localhost:8899`. Click Sync. Heartbeat from the page kee
 
 ## Spotify auth (PKCE flow)
 
-`app/services/spotify.py` uses `spotipy.oauth2.SpotifyPKCE`, not `SpotifyOAuth`. No Client Secret anywhere. Hardcoded `DEFAULT_CLIENT_ID = "ee8d13f0effb403ca47b7fe518b55633"` (sff's shared dev app — public by design); env override via `SPOTIFY_CLIENT_ID` in `app/.env` for power users / BYO-app workaround.
+`app/services/spotify.py` uses `spotipy.oauth2.SpotifyPKCE`, not `SpotifyOAuth`. No Client Secret anywhere — security comes from a per-session crypto challenge instead. Hardcoded `DEFAULT_CLIENT_ID = "ee8d13f0effb403ca47b7fe518b55633"` (sff's shared dev app — Client IDs are public by design, sent in plaintext OAuth URLs); env override via `SPOTIFY_CLIENT_ID` in `app/.env` for power users / BYO-app workaround.
 
-Spotify dev mode caps the shared app at **5 named users**. Extended Quota Mode is closed to individuals (May 2025 policy change). If sff needs to reach more than 5 users, the documented workaround is "user creates their own Spotify dev app and overrides Client ID in `.env`" — scales infinitely.
+Cache lives at `app/.spotify_cache` (gitignored). PKCE-issued tokens cannot be refreshed by code that uses the old `SpotifyOAuth` flow and vice-versa — if you switch flows, delete the cache.
+
+### Spotify Developer Program limits (current — May 2025 policy)
+
+- **Development Mode is capped at 5 named users.** Reduced from 25 in May 2025. The owner is one of those 5 — so 5 users total, not 5 + owner.
+- **Each user must be allowlisted manually** in `dashboard → app → Settings → User Management` using their *Spotify-account email* (which can differ from their primary email).
+- **Non-allowlisted users get 403** during OAuth. They can't authorize, period.
+- **App owner must have a Spotify Premium account** to keep dev-mode apps active.
+- **Higher API rate limits only kick in at Extended Quota Mode.** Standard rate limits are fine for hundreds of tracks per playlist; consider this if syncing huge libraries.
+
+### Extended Quota Mode is effectively closed to individuals
+
+As of May 15, 2025, the apply path moved out of the dashboard into a Google Form requiring:
+- Company email (no `@gmail.com`)
+- Registered business entity
+- Active, launched service
+- **At least 250,000 monthly active users**
+- Review takes up to 6 weeks
+
+This is a chicken-and-egg gate by design — you can't reach 250k MAU with a 5-user cap. Don't waste time applying as an individual. Don't suggest fronting through a sponsor company; reviews catch this and damage that company's developer account.
+
+### How to scale past 5 users
+
+The only realistic path: the user creates their own Spotify dev app (free, takes 2 min) and overrides `SPOTIFY_CLIENT_ID` in `app/.env`. They become the sole occupant of their own dev-mode bubble. README step 3 documents this. **Scales infinitely** because each user is in their own quota.
+
+### Kill-switch if a Client ID gets abused
+
+`dashboard → File Fetcher → Settings → Reset Client ID` (or create a new app entirely). Update `DEFAULT_CLIENT_ID` in `services/spotify.py`, push. Old users on that ID need to re-authorize after pulling.
 
 ## Settings architecture
 
