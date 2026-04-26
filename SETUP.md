@@ -71,13 +71,15 @@ The first time you click Sync, Spotify will pop open a browser asking you to aut
 
 ## Running
 
-Always:
+### Easiest: double-click `start.bat`
+Located in the project root. Opens a console window (where you see logs), starts the server, opens your default browser to `http://localhost:8899` after a 3-second delay. Close the console window to stop the server.
+
+### From a terminal (alternative)
 ```bash
 cd D:/Code/standalone-file-fetcher
 python main.py
 ```
-
-Then open `http://localhost:8899` in your browser.
+Then manually open `http://localhost:8899`.
 
 The UI has one button:
 - **Sync** — Spotify → Rekordbox (downloads new tracks, creates playlists, reorders to match Spotify)
