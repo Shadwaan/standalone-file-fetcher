@@ -2,6 +2,7 @@
 .env
 .spotify_cache*
 sync_state.json
+sync_state.json.bak.*
 app_config.json
 .venv/
 
