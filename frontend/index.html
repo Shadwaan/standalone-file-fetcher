@@ -54,51 +54,6 @@
             color: #999;
         }
 
-        /* Button row */
-        .btn-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 8px;
-        }
-        .usb-btn {
-            width: 100%;
-            padding: 14px 24px;
-            font-size: 16px;
-            font-weight: 600;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.2s;
-            background: #2980b9;
-            color: #fff;
-        }
-        .usb-btn:hover { background: #3498db; }
-        .usb-btn:active { transform: scale(0.98); }
-        .usb-btn:disabled {
-            background: #333;
-            color: #666;
-            cursor: not-allowed;
-        }
-        .usb-btn.running {
-            background: #333;
-            color: #999;
-        }
-        .usb-btn.no-drive {
-            background: #1a1a28;
-            color: #555;
-            border: 1px dashed #333;
-            cursor: not-allowed;
-        }
-
-        /* USB status */
-        .usb-drive-info {
-            font-size: 12px;
-            color: #666;
-            text-align: center;
-            margin-top: 6px;
-        }
-        .usb-drive-info .connected { color: #1db954; }
-        .usb-drive-info .disconnected { color: #e74c3c; }
 
         /* Status Card */
         .card {
@@ -241,15 +196,9 @@
 <body>
     <div class="container">
         <h1>File Fetcher</h1>
-        <p class="subtitle">Spotify &rarr; Rekordbox + Traktor</p>
+        <p class="subtitle">Spotify &rarr; Rekordbox</p>
 
-        <div class="btn-row">
-            <button class="sync-btn" id="syncBtn" onclick="startSync()">Sync</button>
-            <button class="usb-btn no-drive" id="usbBtn" onclick="startUSBExport()" disabled>Sync (USB)</button>
-        </div>
-        <div class="usb-drive-info" id="usbDriveInfo">
-            <span class="disconnected">Drive not connected</span>
-        </div>
+        <button class="sync-btn" id="syncBtn" onclick="startSync()">Sync</button>
 
         <div class="card" id="statusCard" style="display:none">
             <div class="card-title">Status</div>
@@ -337,14 +286,6 @@
                     btn.classList.remove('running');
                     btn.textContent = 'Sync';
                     document.getElementById('statusCard').classList.remove('running');
-
-                    // Also re-enable USB button
-                    const usbBtn = document.getElementById('usbBtn');
-                    if (usbBtn.classList.contains('running')) {
-                        usbBtn.disabled = false;
-                        usbBtn.classList.remove('running');
-                        usbBtn.textContent = 'Sync (USB)';
-                    }
                 }
             } catch (e) {
                 // Ignore transient errors
@@ -458,105 +399,8 @@
             }
         }
 
-        // USB drive detection — poll every 5 seconds
-        let usbDrive = null;
-        let usbPollInterval = null;
-
-        async function checkUSBDrives() {
-            try {
-                const res = await fetch('/api/usb/drives');
-                const data = await res.json();
-                const drives = data.drives || [];
-                const info = document.getElementById('usbDriveInfo');
-                const btn = document.getElementById('usbBtn');
-
-                if (drives.length > 0) {
-                    usbDrive = drives[0];
-                    info.innerHTML = `<span class="connected">${usbDrive.name} (${usbDrive.letter}) — ${usbDrive.free_gb} GB free</span>`;
-                    btn.disabled = false;
-                    btn.classList.remove('no-drive');
-                    btn.textContent = 'Sync (USB)';
-                } else {
-                    usbDrive = null;
-                    info.innerHTML = '<span class="disconnected">Drive not connected</span>';
-                    btn.disabled = true;
-                    btn.classList.add('no-drive');
-                    btn.textContent = 'Sync (USB)';
-                }
-            } catch (e) {
-                // Ignore
-            }
-        }
-
-        let usbExportPollInterval = null;
-
-        async function startUSBExport() {
-            if (!usbDrive) return;
-
-            const btn = document.getElementById('usbBtn');
-            btn.disabled = true;
-            btn.classList.add('running');
-            btn.textContent = 'Exporting...';
-
-            document.getElementById('statusCard').style.display = 'block';
-            document.getElementById('statusCard').classList.add('running');
-
-            try {
-                await fetch(`/api/usb/export?drive_letter=${usbDrive.letter}`, { method: 'POST' });
-                if (usbExportPollInterval) clearInterval(usbExportPollInterval);
-                usbExportPollInterval = setInterval(pollUSBStatus, 1000);
-            } catch (e) {
-                btn.disabled = false;
-                btn.classList.remove('running');
-                btn.textContent = 'Sync (USB)';
-            }
-        }
-
-        async function pollUSBStatus() {
-            try {
-                const res = await fetch('/api/usb/status');
-                const data = await res.json();
-
-                document.getElementById('statusCard').style.display = 'block';
-                document.getElementById('statusMessage').textContent = data.message || data.status;
-                document.getElementById('statusPhase').textContent = data.phase || '';
-
-                document.getElementById('statDownloaded').textContent = data.tracks_copied || 0;
-                document.getElementById('statImported').textContent = data.playlists_exported || 0;
-                document.getElementById('statSkipped').textContent = data.tracks_skipped || 0;
-                document.getElementById('statFailed').textContent = data.errors ? data.errors.length : 0;
-
-                const total = data.tracks_total || 1;
-                const done = (data.tracks_copied || 0) + (data.tracks_skipped || 0);
-                const pct = data.status === 'done' ? 100 : Math.min(100, (done / total) * 100);
-                const fill = document.getElementById('progressFill');
-                fill.style.width = pct + '%';
-                fill.classList.toggle('error', data.status === 'error');
-
-                if (data.errors && data.errors.length > 0) {
-                    document.getElementById('errorCard').style.display = 'block';
-                    document.getElementById('errorList').innerHTML = data.errors.map(e => `<li class="error-item">${e}</li>`).join('');
-                }
-
-                if (data.status === 'done' || data.status === 'error' || data.status === 'idle') {
-                    clearInterval(usbExportPollInterval);
-                    usbExportPollInterval = null;
-
-                    const btn = document.getElementById('usbBtn');
-                    btn.disabled = false;
-                    btn.classList.remove('running');
-                    btn.textContent = 'Sync (USB)';
-                    document.getElementById('statusCard').classList.remove('running');
-                }
-            } catch (e) {
-                // Ignore
-            }
-        }
-
         loadConfig();
         loadStatus();
-        checkUSBDrives();
-        usbPollInterval = setInterval(checkUSBDrives, 5000);
     </script>
 </body>
 </html>

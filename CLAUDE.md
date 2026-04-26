@@ -19,7 +19,11 @@ Extracted from DJ File Manager (FM) and DJ File Fetcher codebases into a single 
 
 The `analyzer.py` file exists but is NOT used in the sync pipeline. It's kept for reference only.
 
-**Auto-analyze is DISABLED.** Rekordbox has no way to filter unanalyzed tracks through GUI automation — Ctrl+A selects everything, causing re-analysis of the whole library. User analyzes each FF playlist manually: click playlist → Ctrl+A → right-click → Analyse Track. This only touches that playlist's tracks.
+**Auto-analyze GUI automation is REMOVED.** It used to live in `services/rekordbox_auto.py`. The problem: Ctrl+A in Rekordbox's Collection selects all 5000 tracks and forces re-analysis of the whole library. We deleted the file entirely 2026-04-26. Users open Rekordbox after sync; Rekordbox auto-analyzes new tracks on next launch (now that import hygiene is correct — UUID, ArtistID, AlbumID, SR/BR from file). No GUI automation needed.
+
+**USB sync is REMOVED.** It used to write a Rekordbox-XML-on-USB format that CDJs couldn't actually use (CDJs need Device Library Plus or PDB, both proprietary). For real CDJ-ready USB drives, use Rekordbox's native "Export to Device" instead. Files removed: `services/usb_detect.py`, `services/usb_export.py`. See git history (commit `ac51935`) if you ever need to revive.
+
+**Traktor sync is OPT-IN.** Set `ENABLE_TRAKTOR=1` in `.env` to also write to `collection.nml`. Default off (Rekordbox-only). Code in `services/traktor.py` is preserved either way.
 
 ---
 

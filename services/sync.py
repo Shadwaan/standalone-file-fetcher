@@ -152,10 +152,21 @@ class SyncOrchestrator:
         from services.spotify import SpotifyService
         from services.downloader import download_track
         from services import rekordbox as rb
-        from services import traktor as tk
 
         music_folder = os.getenv("MUSIC_FOLDER", "D:/Music Backup/Incoming")
         prefix = os.getenv("PLAYLIST_PREFIX", "FF")
+
+        # Traktor sync is opt-in. Set ENABLE_TRAKTOR=1 in .env to keep
+        # collection.nml in sync with Rekordbox. Default off — sff currently
+        # only writes to Rekordbox. The traktor service code in services/traktor.py
+        # is preserved intact for when this is re-enabled.
+        enable_traktor = os.getenv("ENABLE_TRAKTOR", "0").lower() in ("1", "true", "yes", "on")
+        tk = None
+        if enable_traktor:
+            from services import traktor as tk
+            logger.info("Traktor sync ENABLED")
+        else:
+            logger.info("Traktor sync disabled (set ENABLE_TRAKTOR=1 to enable)")
 
         # Build file index across all music directories for duplicate detection
         search_dirs = [music_folder, "D:/Music Backup"]
@@ -207,9 +218,10 @@ class SyncOrchestrator:
             self.progress.playlist_details.append(playlist_detail)
             self.progress.tracks_total += len(new_tracks)
 
-            # Ensure playlists exist in both Rekordbox and Traktor
+            # Ensure playlists exist in both Rekordbox and (optionally) Traktor
             rb_playlist_id = rb.find_or_create_playlist(display_name)
-            tk.find_or_create_playlist(display_name)
+            if tk:
+                tk.find_or_create_playlist(display_name)
 
             # Process new tracks
             for track in new_tracks:
@@ -226,7 +238,7 @@ class SyncOrchestrator:
                     # Just add to playlists (track already in library)
                     if rb_playlist_id:
                         rb.add_track_to_playlist(rb_playlist_id, rb_content_id, track.position + 1)
-                    if existing_path:
+                    if tk and existing_path:
                         tk.add_track_to_playlist(display_name, existing_path, track.position)
 
                     # Track in state
@@ -288,16 +300,18 @@ class SyncOrchestrator:
                 rb_result = rb.import_track_unanalyzed(file_path, track)
                 rb_content_id = rb_result.get("id")
 
-                # Import to Traktor (basic entry — let Traktor analyze)
-                self.progress.message = f"Importing to Traktor: {track.title}"
-                tk.import_track_unanalyzed(file_path, track)
+                # Import to Traktor (basic entry — let Traktor analyze) — opt-in
+                if tk:
+                    self.progress.message = f"Importing to Traktor: {track.title}"
+                    tk.import_track_unanalyzed(file_path, track)
 
                 self.progress.tracks_imported += 1
 
                 # Add to playlists
                 if rb_playlist_id and rb_content_id:
                     rb.add_track_to_playlist(rb_playlist_id, rb_content_id, track.position + 1)
-                tk.add_track_to_playlist(display_name, file_path, track.position)
+                if tk:
+                    tk.add_track_to_playlist(display_name, file_path, track.position)
 
                 # Track in state
                 if pl_id not in self._state["playlists"]:
@@ -317,7 +331,8 @@ class SyncOrchestrator:
                     filename = track_info.get("filename", "")
                     if filename:
                         rb.remove_track_from_playlist(display_name, filename)
-                        tk.remove_track_from_playlist(display_name, filename)
+                        if tk:
+                            tk.remove_track_from_playlist(display_name, filename)
                         self.progress.tracks_removed += 1
                         logger.info("Removed '%s' from playlists (track kept in library)", filename)
 
@@ -335,7 +350,8 @@ class SyncOrchestrator:
                 filenames_ordered.append(fn)
 
             rb.sync_playlist_order(display_name, filenames_ordered)
-            tk.sync_playlist_order(display_name, filenames_ordered)
+            if tk:
+                tk.sync_playlist_order(display_name, filenames_ordered)
 
             # Update state
             if pl_id not in self._state["playlists"]:
@@ -355,16 +371,18 @@ class SyncOrchestrator:
         # Flush WAL so Rekordbox can see our changes
         rb.flush_wal()
 
-        # NOTE: Auto-analyze via GUI automation is DISABLED.
-        # Rekordbox's Ctrl+A selects ALL tracks in Collection, causing it to
-        # re-analyze already-analyzed tracks. There is no way to filter/select
-        # only unanalyzed tracks via GUI automation.
-        # Instead: after sync, open Rekordbox manually, go to each new FF playlist,
-        # select all, right-click → Analyse Track. This only analyzes that playlist.
+        # After sync, count unanalyzed tracks so the UI can prompt the user
+        # to open Rekordbox and analyze them. (sff does NOT trigger analysis;
+        # Rekordbox auto-analyzes new tracks on next launch with the import
+        # hygiene we now do — proper UUID, ArtistID, AlbumID, SR/BR.)
         if self.progress.tracks_downloaded > 0:
             try:
-                from services.rekordbox_auto import _count_unanalyzed
-                unanalyzed = _count_unanalyzed()
+                from pyrekordbox import Rekordbox6Database
+                from pyrekordbox.db6 import tables
+                _db = Rekordbox6Database()
+                unanalyzed = _db.session.query(tables.DjmdContent).filter_by(Analysed=0).count()
+                _db.session.close()
+                _db.engine.dispose()
                 if unanalyzed > 0:
                     self.progress.message = (
                         f"Sync complete. {unanalyzed} tracks need analysis in Rekordbox. "

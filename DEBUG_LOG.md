@@ -379,3 +379,58 @@ The DjmdSongPlaylist row creation (`add_track_to_playlist`) was already updated 
 - Earlier MM debugging (sections 3.6 + section 11) never identified this — we deleted MM rather than properly diagnosed it. That left the bug in the codebase. **Lesson: don't delete a broken case until you've understood why it's broken.** Otherwise the next case hits the same wall.
 - The 32-bit playlist ID constraint is documented nowhere obvious. Empirical proof: ALL existing-and-working playlists in this user's library have ≤8-hex-char IDs. The hash-mod-10^10 ID generator was a latent bug that worked for ~43% of generated names.
 - masterPlaylists6.xml is a real registry, not a cache. Earlier debug log warned "don't modify masterPlaylists6.xml" — that warning was wrong (or at least over-broad). It needs to be modified when adding new playlists. We should NOT modify entries that are already there (they encode track position memory), but appending a new NODE for a new playlist is safe and required.
+
+
+---
+
+## 13. Session 2026-04-26: Scope cleanup — remove USB, dead-code Traktor, kill GUI automation
+
+After NuJungle proved fresh syncs work end-to-end with the import hygiene we landed in r5, the user audited the project's surface area and asked what could be cut. Three things were either dead, broken-by-design, or off-by-default:
+
+### 13.1 Removed: GUI automation (`services/rekordbox_auto.py`)
+- File contained `launch_and_analyze_unanalyzed()` (the full GUI automation flow we built and disabled in section 11) plus a `_count_unanalyzed()` helper.
+- The full flow was already disabled — it kept re-analyzing the user's entire 5000-track library via Ctrl+A in Collection.
+- The only thing still called from `sync.py` was the 3-line `_count_unanalyzed()` DB query.
+- **Action:** deleted the file. Inlined the count query directly into `sync.py` after WAL flush:
+  ```python
+  _db = Rekordbox6Database()
+  unanalyzed = _db.session.query(tables.DjmdContent).filter_by(Analysed=0).count()
+  _db.session.close(); _db.engine.dispose()
+  ```
+- Also removed dependencies that only served `rekordbox_auto.py`: `pyautogui`, `pygetwindow`, `pywinauto` from `requirements.txt`.
+
+### 13.2 Removed: USB sync (`services/usb_export.py`, `services/usb_detect.py`)
+Honest assessment of why it was wrong:
+- It produced `rekordbox.xml` on the USB drive. CDJs do not read XML — they read Device Library Plus (`exportLibrary.db`) or legacy PDB (`export.pdb`). Both are proprietary formats with undocumented schemas. Writing them outside Rekordbox is not feasible for a personal project.
+- Net output of sff USB sync: a USB drive with audio + ANLZ + an XML file CDJs ignore. CDJ would see audio as a flat folder with no playlist navigation. Effectively useless for the user's actual use case (CDJ-3000 playback).
+- The user has to open Rekordbox after sync anyway (for analysis). Rekordbox's native "Export to Device" produces real DLP/PDB and is what they actually need.
+
+**Action:**
+- Deleted `services/usb_export.py`, `services/usb_detect.py` (~700 lines)
+- Removed `/api/usb/drives`, `/api/usb/export`, `/api/usb/status` endpoints from `main.py`
+- Removed "Sync (USB)" button + USB CSS + USB JS poller from `frontend/index.html`
+- The sff UI now has one button (Sync). USB workflow documented in SETUP.md as: do sff sync → open Rekordbox → analyze → File → Export to Device.
+
+If ever wanted back: it's in git history at commit `ac51935`.
+
+### 13.3 Made opt-in: Traktor sync
+The user doesn't currently use Traktor but wants the option. Previously every sff sync atomically rewrote `collection.nml` which is wasted work and (small) corruption risk if process is killed mid-write.
+
+**Action:** wrapped every Traktor call in `services/sync.py` with `if tk:`, where `tk` is `None` when `ENABLE_TRAKTOR` env var is not set. To re-enable, add `ENABLE_TRAKTOR=1` to `.env`. The `services/traktor.py` file is preserved as-is — no changes needed to revive.
+
+```python
+enable_traktor = os.getenv("ENABLE_TRAKTOR", "0").lower() in ("1", "true", "yes", "on")
+tk = None
+if enable_traktor:
+    from services import traktor as tk
+```
+
+### 13.4 What this session did NOT change
+- The Spotify → Rekordbox flow (the actual core feature)
+- Rekordbox import hygiene (UUID, ArtistID/AlbumID, SR/BR from file, drag-import-parity fields, masterPlaylists6.xml registration)
+- The 3-layer dedup
+- Backup files in `%APPDATA%/Pioneer/rekordbox/` from earlier debugging sessions
+
+### 13.5 Honest meta-observation
+- I built features (USB sync, GUI automation) without confirming the user actually needed them work the way I imagined. USB sync in particular was building the wrong thing — I knew CDJs needed DLP/PDB but I built XML export anyway because it was achievable. That's solving the easier-but-wrong problem.
+- The right pattern: when a feature requires reverse-engineering a proprietary format, the answer is usually "use the official tool" not "build a worse version that ships incomplete data."

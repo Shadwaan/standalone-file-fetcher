@@ -3,7 +3,7 @@
 > Quick instructions to get `Standalone File Fetcher` running on a fresh machine, or for handing to a new Claude session.
 
 ## What sff does (in one sentence)
-Watches your Spotify FF-prefixed playlists, downloads new tracks from YouTube, and imports them into Rekordbox + Traktor with all their playlists/ordering kept in sync — accessed from a local web UI at `http://localhost:8899`.
+Watches your Spotify FF-prefixed playlists, downloads new tracks from YouTube, and imports them into Rekordbox (and optionally Traktor) with all their playlists/ordering kept in sync — accessed from a local web UI at `http://localhost:8899`.
 
 ## TL;DR for a new Claude session
 
@@ -79,15 +79,31 @@ python main.py
 
 Then open `http://localhost:8899` in your browser.
 
-The UI has two buttons:
-- **Sync** — Spotify → Rekordbox + Traktor (downloads new tracks, creates playlists)
-- **Sync (USB)** — Rekordbox → USB pen drive (greyed out when no USB connected)
+The UI has one button:
+- **Sync** — Spotify → Rekordbox (downloads new tracks, creates playlists, reorders to match Spotify)
+
+For USB export to CDJs, use Rekordbox's native **File → Export Collection in rekordbox xml format** + **Export to Device** after sff finishes syncing and Rekordbox has analyzed the new tracks. We removed the in-app USB button because writing CDJ-readable Device Library Plus / PDB outside Rekordbox is impractical (proprietary formats), and Rekordbox's native export is what you actually need.
 
 ### Pre-flight rules
 
 1. **Close Rekordbox before clicking Sync.** sff refuses to write to master.db while Rekordbox is open (it would corrupt or lose writes).
 2. **Don't force-quit Rekordbox during analysis.** Force-quit loses unsaved DB commits — your analysis goes to the ANLZ files but the DB row update stays in memory and gets dropped. Click X and let it close itself.
 3. **After Sync finishes, open Rekordbox to analyze new tracks** (right-click → Analyse Track on each new playlist).
+
+### Toggling Traktor sync on/off
+
+Traktor sync is **OFF by default.** Set it on by adding to `.env`:
+```
+ENABLE_TRAKTOR=1
+```
+or
+```
+ENABLE_TRAKTOR=true
+```
+
+Restart the server (`python main.py`) for it to take effect. When ON, sff will also write to your `collection.nml` for every track import, playlist creation, ordering change, and removal.
+
+Set back to `0` (or remove the line) to turn it off again. The Traktor service code is preserved either way (`services/traktor.py`); the toggle just controls whether `sync.py` calls it.
 
 ---
 
@@ -140,12 +156,12 @@ Spotify (FF playlists)
 sff (FastAPI, localhost:8899)
     ↓ yt-dlp + ffmpeg + mutagen
 Local MP3s (D:/Music Backup/Incoming/{playlist}/)
-    ↓ pyrekordbox + xml.etree
-Rekordbox (master.db + ANLZ + masterPlaylists6.xml)
-    ↓ atomic XML write
-Traktor (collection.nml)
-    ↓ Sync (USB) button
-USB pen drive (audio + ANLZ + rekordbox.xml + Traktor NML)
+    ↓ pyrekordbox + masterPlaylists6.xml registration
+Rekordbox (master.db + ANLZ on first analyze)
+    ↓ optional: ENABLE_TRAKTOR=1
+Traktor (collection.nml, atomic write)
+    ↓ Rekordbox's native "Export to Device" (NOT sff)
+USB pen drive (Device Library Plus + ANLZ)
     ↓
 CDJ-3000 / XDJ
 ```

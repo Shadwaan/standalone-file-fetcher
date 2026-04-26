@@ -9,6 +9,3 @@ pyrekordbox>=0.3.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 psutil>=5.9.0
-pyautogui>=0.9.54
-pygetwindow>=0.0.9
-pywinauto>=0.6.8
