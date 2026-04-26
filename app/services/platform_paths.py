@@ -69,10 +69,20 @@ DEFAULT_MUSIC_FOLDER = _default_music_folder()
 
 
 def _resolve_ffmpeg() -> str | None:
-    """Locate ffmpeg. PATH first; then platform-typical install locations."""
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
+    """Locate ffmpeg. Prefer full builds (with libmp3lame) over PATH stubs.
+
+    On Windows, the App Execution Alias at
+    ``%LOCALAPPDATA%\\Microsoft\\WindowsApps\\ffmpeg.EXE`` typically appears
+    on PATH before WinGet's install dir. That alias is often an
+    **audio-only** ffmpeg build that can decode MP3 but CANNOT encode it
+    (no libmp3lame in its configure flags). yt-dlp's MP3 320kbps conversion
+    fails against it with "Encoder not found".
+
+    We therefore check WinGet's Gyan.FFmpeg full build FIRST on Windows
+    (which README step 2 tells users to install), then fall back to PATH.
+    On Mac, brew's ffmpeg includes libmp3lame by default, so the original
+    PATH-first order is fine there.
+    """
     if IS_WINDOWS:
         candidates = glob.glob(
             str(Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
@@ -80,6 +90,9 @@ def _resolve_ffmpeg() -> str | None:
         )
         if candidates:
             return sorted(candidates)[-1]
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
     if IS_MAC:
         # Standard brew prefixes + common non-default user-local installs
         candidates = [
