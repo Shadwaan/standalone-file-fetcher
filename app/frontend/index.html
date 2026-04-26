@@ -179,11 +179,97 @@
         .config-row {
             display: flex;
             justify-content: space-between;
+            align-items: center;
             padding: 4px 0;
             font-size: 13px;
+            gap: 8px;
         }
         .config-label { color: #666; }
-        .config-value { color: #aaa; font-family: monospace; font-size: 12px; }
+        .config-value { color: #aaa; font-family: monospace; font-size: 12px; word-break: break-all; }
+        .link-btn {
+            background: none;
+            border: none;
+            color: #1db954;
+            font-size: 12px;
+            cursor: pointer;
+            padding: 2px 4px;
+            font-family: inherit;
+        }
+        .link-btn:hover { text-decoration: underline; }
+        .stop-btn {
+            background: #2a1518;
+            border: 1px solid #4a2025;
+            color: #e74c3c;
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 8px;
+        }
+        .stop-btn:hover { background: #3a1c20; }
+
+        /* Modal */
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.75);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+        .modal-backdrop.show { display: flex; }
+        .modal {
+            background: #141420;
+            border: 1px solid #333;
+            border-radius: 10px;
+            padding: 24px;
+            max-width: 480px;
+            width: 90%;
+        }
+        .modal h2 { color: #fff; font-size: 18px; margin-bottom: 8px; }
+        .modal p { color: #aaa; font-size: 13px; margin-bottom: 16px; line-height: 1.5; }
+        .modal .path-display {
+            background: #0a0a0f;
+            border: 1px solid #222;
+            padding: 10px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #e0e0e0;
+            margin-bottom: 12px;
+            word-break: break-all;
+            min-height: 36px;
+        }
+        .modal .path-display.placeholder { color: #555; }
+        .modal-input {
+            width: 100%;
+            padding: 8px 10px;
+            background: #0a0a0f;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #e0e0e0;
+            font-family: monospace;
+            font-size: 12px;
+            margin-bottom: 8px;
+        }
+        .modal-actions { display: flex; gap: 8px; margin-top: 16px; }
+        .modal-btn {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: inherit;
+        }
+        .modal-btn.primary { background: #1db954; color: #fff; }
+        .modal-btn.primary:hover { background: #1ed760; }
+        .modal-btn.primary:disabled { background: #333; color: #666; cursor: not-allowed; }
+        .modal-btn.secondary { background: #2a2a3a; color: #ccc; }
+        .modal-btn.secondary:hover { background: #353548; }
+        .modal-error { color: #e74c3c; font-size: 12px; margin-top: 6px; min-height: 16px; }
 
         /* Animations */
         @keyframes pulse {
@@ -233,6 +319,11 @@
             <ul class="playlist-list" id="playlistList"></ul>
         </div>
 
+        <div class="card" id="trackedCard" style="display:none">
+            <div class="card-title">Tracked Playlists <span style="color:#444;font-weight:400;text-transform:none;letter-spacing:0">(in sync state — click ✕ to stop syncing)</span></div>
+            <ul class="playlist-list" id="trackedList"></ul>
+        </div>
+
         <div class="card" id="errorCard" style="display:none">
             <div class="card-title">Errors</div>
             <ul class="error-list" id="errorList"></ul>
@@ -244,6 +335,27 @@
         </div>
 
         <div class="last-sync" id="lastSync"></div>
+    </div>
+
+    <div class="modal-backdrop" id="folderModal">
+        <div class="modal">
+            <h2 id="folderModalTitle">Where should we download your music?</h2>
+            <p id="folderModalDesc">
+                Pick a folder on your computer. We'll create an <code style="color:#1db954">Incoming</code>
+                subfolder inside it and store all downloaded MP3s there, organized by playlist.
+            </p>
+            <div class="path-display placeholder" id="folderPathDisplay">No folder selected yet</div>
+            <input type="text" class="modal-input" id="folderPathInput"
+                   placeholder="…or paste an absolute path here" autocomplete="off" />
+            <div class="modal-error" id="folderModalError"></div>
+            <div class="modal-actions">
+                <button class="modal-btn secondary" id="folderBrowseBtn" onclick="openFolderPicker()">Browse…</button>
+                <button class="modal-btn primary" id="folderSaveBtn" onclick="saveMusicFolder()" disabled>Save</button>
+            </div>
+            <div class="modal-actions" id="folderModalCancelRow" style="display:none;margin-top:8px">
+                <button class="modal-btn secondary" onclick="closeFolderModal()">Cancel</button>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -351,31 +463,217 @@
         }
 
         // Load config on page load
+        let lastConfig = null;
         async function loadConfig() {
             try {
                 const res = await fetch('/api/config');
                 const cfg = await res.json();
+                lastConfig = cfg;
                 const section = document.getElementById('configSection');
                 section.innerHTML = `
+                    <div class="config-row">
+                        <span class="config-label">Platform</span>
+                        <span class="config-value">${cfg.platform}</span>
+                    </div>
                     <div class="config-row">
                         <span class="config-label">Prefix</span>
                         <span class="config-value">${cfg.playlist_prefix}</span>
                     </div>
                     <div class="config-row">
+                        <span class="config-label">Spotify</span>
+                        <span class="config-value" style="color:${cfg.spotify_signed_in ? '#1db954' : '#777'}">
+                            ${cfg.spotify_signed_in ? 'Signed in' : 'Not signed in (will prompt on Sync)'}
+                        </span>
+                        ${cfg.spotify_signed_in ? `<button class="link-btn" onclick="signOutSpotify()">Sign out</button>` : ''}
+                    </div>
+                    <div class="config-row">
                         <span class="config-label">Music Folder</span>
                         <span class="config-value">${cfg.music_folder}</span>
+                        <button class="link-btn" onclick="openFolderModal(false)">Change…</button>
                     </div>
                     <div class="config-row">
                         <span class="config-label">Rekordbox DB</span>
-                        <span class="config-value">${cfg.rekordbox_db ? 'Connected' : 'Not set'}</span>
+                        <span class="config-value">${cfg.rekordbox_db}</span>
                     </div>
                     <div class="config-row">
-                        <span class="config-label">Traktor NML</span>
-                        <span class="config-value">${cfg.traktor_nml ? 'Connected' : 'Not set'}</span>
+                        <span class="config-label">Sync to Traktor</span>
+                        <span class="config-value" style="display:flex;align-items:center;gap:8px">
+                            <input type="checkbox" id="traktorToggle" ${cfg.sync_to_traktor ? 'checked' : ''}
+                                   onchange="toggleTraktor(this.checked)"
+                                   style="cursor:pointer;width:16px;height:16px;accent-color:#1db954" />
+                            <label for="traktorToggle" style="cursor:pointer;color:${cfg.sync_to_traktor ? '#1db954' : '#777'}">
+                                ${cfg.sync_to_traktor
+                                    ? (cfg.traktor_nml_exists ? cfg.traktor_nml : '⚠️ ' + cfg.traktor_nml + ' not found')
+                                    : 'Off (Rekordbox-only)'}
+                            </label>
+                        </span>
+                    </div>
+                    <div class="config-row">
+                        <span class="config-label">ffmpeg</span>
+                        <span class="config-value">${cfg.ffmpeg_available ? cfg.ffmpeg_path : 'Not found — install via brew (Mac) or winget (Windows)'}</span>
                     </div>
                 `;
+                if (!cfg.first_run_complete) {
+                    openFolderModal(true);
+                }
             } catch (e) {
                 // Ignore
+            }
+        }
+
+        // Folder picker modal
+        let pickedPath = '';
+        function openFolderModal(isFirstRun) {
+            pickedPath = '';
+            document.getElementById('folderPathDisplay').textContent =
+                isFirstRun ? 'No folder selected yet' : (lastConfig?.music_folder || '');
+            document.getElementById('folderPathDisplay').classList.toggle('placeholder', isFirstRun);
+            document.getElementById('folderPathInput').value = '';
+            document.getElementById('folderModalError').textContent = '';
+            document.getElementById('folderSaveBtn').disabled = true;
+            document.getElementById('folderModalCancelRow').style.display = isFirstRun ? 'none' : 'flex';
+            document.getElementById('folderModalTitle').textContent =
+                isFirstRun ? 'Where should we download your music?' : 'Change download folder';
+            document.getElementById('folderModal').classList.add('show');
+        }
+
+        function closeFolderModal() {
+            document.getElementById('folderModal').classList.remove('show');
+        }
+
+        async function openFolderPicker() {
+            const errEl = document.getElementById('folderModalError');
+            errEl.textContent = '';
+            const btn = document.getElementById('folderBrowseBtn');
+            const originalText = btn.textContent;
+            btn.textContent = 'Opening picker…';
+            btn.disabled = true;
+            try {
+                const res = await fetch('/api/config/pick-folder', { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    errEl.textContent = data.error + ' — paste the path in the field below instead.';
+                    return;
+                }
+                if (data.path) {
+                    setPickedPath(data.path);
+                }
+            } catch (e) {
+                errEl.textContent = 'Native picker unavailable (' + e.message + '). Paste the path in the field below instead.';
+            } finally {
+                btn.textContent = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        function setPickedPath(p) {
+            pickedPath = p;
+            const disp = document.getElementById('folderPathDisplay');
+            disp.textContent = p;
+            disp.classList.remove('placeholder');
+            document.getElementById('folderSaveBtn').disabled = !p;
+        }
+
+        document.addEventListener('input', (e) => {
+            if (e.target.id === 'folderPathInput') {
+                setPickedPath(e.target.value.trim());
+            }
+        });
+
+        async function signOutSpotify() {
+            if (!confirm("Sign out of Spotify?\n\nNext time you click Sync, you'll be asked to authorize again — useful if you want to log in as a different account. This does NOT revoke sff's access on Spotify's side; visit spotify.com/account/apps for that.")) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/spotify/sign-out', { method: 'POST' });
+                if (res.ok) {
+                    loadConfig();
+                } else {
+                    const data = await res.json();
+                    alert('Sign-out failed: ' + (data.error || res.status));
+                }
+            } catch (e) {
+                alert('Sign-out failed: ' + e.message);
+            }
+        }
+
+        async function toggleTraktor(enabled) {
+            try {
+                await fetch('/api/config/traktor', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled }),
+                });
+                loadConfig();
+            } catch (e) {
+                alert('Failed to toggle Traktor: ' + e.message);
+                loadConfig();
+            }
+        }
+
+        async function saveMusicFolder() {
+            const errEl = document.getElementById('folderModalError');
+            errEl.textContent = '';
+            const btn = document.getElementById('folderSaveBtn');
+            btn.disabled = true;
+            try {
+                const res = await fetch('/api/config/music-folder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ music_folder: pickedPath }),
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    errEl.textContent = data.error || 'Save failed';
+                    btn.disabled = false;
+                    return;
+                }
+                closeFolderModal();
+                loadConfig();
+            } catch (e) {
+                errEl.textContent = e.message;
+                btn.disabled = false;
+            }
+        }
+
+        // Tracked playlists (sync state) + stop-syncing
+        async function loadTrackedPlaylists() {
+            try {
+                const res = await fetch('/api/playlists/tracked');
+                const data = await res.json();
+                const playlists = data.playlists || [];
+                const card = document.getElementById('trackedCard');
+                const list = document.getElementById('trackedList');
+                if (playlists.length === 0) {
+                    card.style.display = 'none';
+                    return;
+                }
+                card.style.display = 'block';
+                list.innerHTML = playlists.map(pl => `
+                    <li class="playlist-item">
+                        <span class="playlist-name">${pl.display_name}</span>
+                        <span class="playlist-meta">
+                            ${pl.track_count} tracks
+                            <button class="stop-btn" onclick="stopSyncing('${pl.id}', '${(pl.display_name || '').replace(/'/g, "\\'")}')">✕ Stop syncing</button>
+                        </span>
+                    </li>
+                `).join('');
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        async function stopSyncing(playlistId, name) {
+            if (!confirm(`Stop syncing "${name}"?\n\nThis only removes it from the sync tracker — Rekordbox is untouched. Re-add the FF prefix in Spotify and sync again to bring it back.`)) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/playlists/' + encodeURIComponent(playlistId) + '/stop-syncing', { method: 'POST' });
+                if (res.ok) {
+                    loadTrackedPlaylists();
+                }
+            } catch (e) {
+                alert('Failed: ' + e.message);
             }
         }
 
@@ -401,6 +699,16 @@
 
         loadConfig();
         loadStatus();
+        loadTrackedPlaylists();
+
+        // Heartbeat: tells the server "the browser is still here". When the user
+        // closes this tab, heartbeats stop, and (if launched via start.command /
+        // start.bat) the server auto-shuts-down after ~20s of silence.
+        function sendHeartbeat() {
+            fetch('/api/heartbeat', { method: 'POST', keepalive: true }).catch(() => {});
+        }
+        sendHeartbeat();
+        setInterval(sendHeartbeat, 5000);
     </script>
 </body>
 </html>

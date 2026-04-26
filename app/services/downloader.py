@@ -15,15 +15,15 @@ from mutagen.id3 import APIC, TALB, TDRC, TIT2, TPE1
 from mutagen.mp3 import MP3
 
 from models.track import TrackInfo
+from services.platform_paths import FFMPEG_DIR, FFMPEG_PATH
 
 logger = logging.getLogger(__name__)
 
 # Duration tolerance for YouTube matching (seconds)
 DURATION_TOLERANCE_SECS = 30
 
-# ffmpeg path — set on PATH at module load
-FFMPEG_DIR = r"C:\Users\Lenovo\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin"
-if FFMPEG_DIR not in os.environ.get("PATH", ""):
+# Make ffmpeg discoverable to yt-dlp's child processes via PATH
+if FFMPEG_DIR and FFMPEG_DIR not in os.environ.get("PATH", ""):
     os.environ["PATH"] = FFMPEG_DIR + os.pathsep + os.environ.get("PATH", "")
 
 

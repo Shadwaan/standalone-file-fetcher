@@ -25,6 +25,7 @@ CONFIG_FILE = Path(__file__).parent.parent / "app_config.json"
 _DEFAULTS = {
     "music_folder": None,        # null = unconfigured; UI shows first-run prompt
     "first_run_complete": False,
+    "sync_to_traktor": False,    # also write to Traktor's collection.nml on each sync
 }
 
 
@@ -93,3 +94,21 @@ def set_music_folder(folder: str) -> dict:
 def is_first_run() -> bool:
     """True if the user hasn't completed first-run setup yet."""
     return not load().get("first_run_complete", False)
+
+
+def get_sync_to_traktor() -> bool:
+    """Resolve whether to also write to Traktor (UI checkbox > env override > False)."""
+    cfg = load()
+    if cfg.get("sync_to_traktor"):
+        return True
+    # Legacy env var override (for users upgrading from earlier versions)
+    return os.getenv("ENABLE_TRAKTOR", "0").lower() in ("1", "true", "yes", "on")
+
+
+def set_sync_to_traktor(enabled: bool) -> dict:
+    """Set the Traktor sync toggle. Returns the updated config dict."""
+    cfg = load()
+    cfg["sync_to_traktor"] = bool(enabled)
+    save(cfg)
+    logger.info("sync_to_traktor set to %s", cfg["sync_to_traktor"])
+    return cfg

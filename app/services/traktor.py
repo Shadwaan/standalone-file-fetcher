@@ -13,13 +13,11 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from models.track import AnalysisResult, TrackInfo
+from services.platform_paths import DEFAULT_TRAKTOR_NML
 
 logger = logging.getLogger(__name__)
 
-NML_PATH = os.getenv(
-    "TRAKTOR_NML_PATH",
-    r"C:\Users\Lenovo\Documents\Native Instruments\Traktor 3.8.0\collection.nml",
-)
+NML_PATH = os.getenv("TRAKTOR_NML_PATH", DEFAULT_TRAKTOR_NML)
 
 # Open Key -> Traktor MUSICAL_KEY value (0-23)
 # Major: 1d=C(0), 2d=G(7), 3d=D(2), 4d=A(9), 5d=E(4), 6d=B(11), 7d=F#(6), 8d=Db(1), 9d=Ab(8), 10d=Eb(3), 11d=Bb(10), 12d=F(5)

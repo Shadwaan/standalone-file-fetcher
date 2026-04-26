@@ -8,7 +8,9 @@ Run: python main.py
 import asyncio
 import logging
 import os
+import signal
 import sys
+import time
 from pathlib import Path
 
 import uvicorn
@@ -16,6 +18,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -94,22 +97,191 @@ async def get_playlists():
     }
 
 
+SPOTIFY_CACHE_FILE = Path(__file__).parent / ".spotify_cache"
+
+
 @app.get("/api/config")
 async def get_config():
-    """Get current configuration (non-sensitive)."""
+    """Get current configuration (non-sensitive). Resolves music_folder + traktor toggle via app_config."""
+    from services import app_config
+    from services import platform_paths
+    cfg = app_config.load()
+    traktor_nml = os.getenv("TRAKTOR_NML_PATH", platform_paths.DEFAULT_TRAKTOR_NML or "")
     return {
         "playlist_prefix": os.getenv("PLAYLIST_PREFIX", "FF"),
-        "music_folder": os.getenv("MUSIC_FOLDER", ""),
-        "rekordbox_db": os.getenv("REKORDBOX_DB_PATH", ""),
-        "traktor_nml": os.getenv("TRAKTOR_NML_PATH", ""),
-        "anlz_root": os.getenv("ANLZ_ROOT", ""),
+        "music_folder": app_config.get_music_folder(),
+        "music_folder_set_by_user": cfg.get("music_folder") is not None,
+        "first_run_complete": cfg.get("first_run_complete", False),
+        "sync_to_traktor": app_config.get_sync_to_traktor(),
+        "traktor_nml": traktor_nml,
+        "traktor_nml_exists": bool(traktor_nml) and os.path.exists(traktor_nml),
+        "rekordbox_db": platform_paths.REKORDBOX_MASTER_DB,
+        "anlz_root": os.getenv("ANLZ_ROOT", platform_paths.DEFAULT_ANLZ_ROOT),
+        "platform": "windows" if platform_paths.IS_WINDOWS else ("mac" if platform_paths.IS_MAC else "other"),
+        "ffmpeg_available": platform_paths.FFMPEG_PATH is not None,
+        "ffmpeg_path": platform_paths.FFMPEG_PATH,
+        "spotify_signed_in": SPOTIFY_CACHE_FILE.exists(),
     }
+
+
+@app.post("/api/spotify/sign-out")
+async def spotify_sign_out():
+    """Sign out of Spotify by deleting the cached OAuth token.
+
+    Does NOT revoke the grant on Spotify's side — for a full revoke, the user
+    has to visit https://www.spotify.com/account/apps. This just makes sff
+    forget the current token so the next Sync triggers a fresh auth flow
+    (e.g. to log in as a different account).
+    """
+    if SPOTIFY_CACHE_FILE.exists():
+        try:
+            SPOTIFY_CACHE_FILE.unlink()
+            return {"status": "ok", "signed_in": False}
+        except OSError as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    return {"status": "ok", "signed_in": False, "note": "was not signed in"}
+
+
+class MusicFolderUpdate(BaseModel):
+    music_folder: str
+
+
+class TraktorToggleUpdate(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/config/traktor")
+async def set_traktor(payload: TraktorToggleUpdate):
+    """Enable/disable Traktor sync. When enabled, each sync also writes to collection.nml."""
+    from services import app_config
+    cfg = app_config.set_sync_to_traktor(payload.enabled)
+    return {"status": "ok", "sync_to_traktor": cfg["sync_to_traktor"]}
+
+
+@app.post("/api/config/music-folder")
+async def set_music_folder(payload: MusicFolderUpdate):
+    """Set the music download folder. Appends '/Incoming' if not already present."""
+    from services import app_config
+    try:
+        cfg = app_config.set_music_folder(payload.music_folder)
+        return {"status": "ok", "music_folder": cfg["music_folder"]}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+_PICK_FOLDER_SCRIPT = r"""
+import sys
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+except Exception as e:
+    sys.stderr.write(f"tkinter unavailable: {e}\n")
+    sys.exit(2)
+root = tk.Tk()
+root.withdraw()
+root.attributes("-topmost", True)
+try:
+    chosen = filedialog.askdirectory(title="Choose your music download folder", mustexist=True)
+finally:
+    root.destroy()
+sys.stdout.write(chosen or "")
+"""
+
+
+@app.post("/api/config/pick-folder")
+async def pick_folder():
+    """Open a native OS folder-picker dialog and return the selected path.
+
+    Runs tkinter in a SUBPROCESS, not a worker thread — tkinter on macOS
+    requires the main thread of its process, and uvicorn workers aren't it.
+    The dialog appears on the user's machine because the server IS the user's machine.
+    """
+    import subprocess
+    def _spawn():
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", _PICK_FOLDER_SCRIPT],
+                capture_output=True, text=True, timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return {"error": "Folder picker timed out"}
+        if result.returncode == 2:
+            return {"error": result.stderr.strip() or "tkinter not available — type the path manually"}
+        if result.returncode != 0:
+            return {"error": result.stderr.strip() or f"Picker exited {result.returncode}"}
+        return {"path": result.stdout.strip()}
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _spawn)
+    if "error" in result:
+        return JSONResponse(result, status_code=501)
+    return result
+
+
+@app.post("/api/playlists/{playlist_id}/stop-syncing")
+async def stop_syncing_playlist(playlist_id: str):
+    """Remove a playlist from sync_state.json. Does NOT touch Rekordbox/Traktor."""
+    orchestrator = _get_orchestrator()
+    result = orchestrator.stop_syncing_playlist(playlist_id)
+    if not result.get("removed"):
+        return JSONResponse(result, status_code=404)
+    return result
+
+
+@app.get("/api/playlists/tracked")
+async def get_tracked_playlists():
+    """List all playlists currently in sync_state.json (regardless of last sync run)."""
+    orchestrator = _get_orchestrator()
+    tracked = []
+    for pid, pdata in orchestrator._state.get("playlists", {}).items():
+        tracked.append({
+            "id": pid,
+            "name": pdata.get("name", pid),
+            "display_name": pdata.get("display_name", pdata.get("name", pid)),
+            "track_count": len(pdata.get("tracks", {})),
+        })
+    return {"playlists": tracked}
 
 
 @app.get("/api/health")
 async def health():
     """Health check."""
     return {"status": "ok", "version": "1.0.0"}
+
+
+# ─── Auto-shutdown when the browser disconnects ────────────────────────────
+# Set AUTO_SHUTDOWN_IDLE=<seconds> to enable. start.command/start.bat set
+# this so closing the browser tab also kills the server (and the Terminal
+# window). Default off, so manual `python main.py` runs stay alive.
+
+_AUTO_SHUTDOWN_IDLE = int(os.getenv("AUTO_SHUTDOWN_IDLE", "0"))
+_last_heartbeat_at = time.monotonic()
+
+
+@app.post("/api/heartbeat")
+async def heartbeat():
+    """Frontend pings this every few seconds while the page is open."""
+    global _last_heartbeat_at
+    _last_heartbeat_at = time.monotonic()
+    return {"ok": True}
+
+
+async def _idle_watchdog():
+    """If no heartbeat for AUTO_SHUTDOWN_IDLE seconds, exit cleanly."""
+    while True:
+        await asyncio.sleep(5)
+        idle = time.monotonic() - _last_heartbeat_at
+        if idle > _AUTO_SHUTDOWN_IDLE:
+            logger.info("No browser heartbeat for %.0fs — auto-shutdown", idle)
+            os.kill(os.getpid(), signal.SIGINT)
+            return
+
+
+@app.on_event("startup")
+async def _start_idle_watchdog():
+    if _AUTO_SHUTDOWN_IDLE > 0:
+        logger.info("Auto-shutdown enabled: server exits if idle > %ds", _AUTO_SHUTDOWN_IDLE)
+        asyncio.create_task(_idle_watchdog())
 
 
 if __name__ == "__main__":

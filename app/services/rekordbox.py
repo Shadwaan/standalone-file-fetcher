@@ -16,13 +16,17 @@ from pathlib import Path
 import numpy as np
 
 from models.track import AnalysisResult, TrackInfo
+from services.platform_paths import (
+    DEFAULT_ANLZ_ROOT,
+    REKORDBOX_BASE_DIR,
+    REKORDBOX_PLAYLISTS_XML,
+    REKORDBOX_SHARE_DIR,
+    REKORDBOX_WAL,
+)
 
 logger = logging.getLogger(__name__)
 
-ANLZ_ROOT = os.getenv(
-    "ANLZ_ROOT",
-    os.path.join(os.environ.get("APPDATA", ""), "Pioneer", "rekordbox", "share", "PIONEER", "USBANLZ"),
-)
+ANLZ_ROOT = os.getenv("ANLZ_ROOT", DEFAULT_ANLZ_ROOT)
 
 # File header version bytes (matches real Rekordbox output)
 FILE_HEADER_FLAGS = b"\x00\x00\x00\x01\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
@@ -482,9 +486,8 @@ def import_track(file_path: str, track: TrackInfo, analysis: AnalysisResult) -> 
 
         # Set analysis data path
         if anlz_result.get("success"):
-            share_root = os.path.join(os.environ.get("APPDATA", ""), "Pioneer", "rekordbox", "share")
             dat_path = os.path.join(anlz_result["anlz_dir"], "ANLZ0000.DAT")
-            rel = os.path.relpath(dat_path, share_root).replace("\\", "/")
+            rel = os.path.relpath(dat_path, REKORDBOX_SHARE_DIR).replace("\\", "/")
             content.AnalysisDataPath = "/" + rel
 
         content.updated_at = datetime.now(timezone.utc)
@@ -589,10 +592,7 @@ def _register_playlist_in_xml(playlist_id: str):
         import xml.etree.ElementTree as ET
         from datetime import datetime as _dt
 
-        xml_path = os.path.join(
-            os.environ.get("APPDATA", ""),
-            "Pioneer", "rekordbox", "masterPlaylists6.xml"
-        )
+        xml_path = REKORDBOX_PLAYLISTS_XML
         if not os.path.exists(xml_path):
             logger.warning("masterPlaylists6.xml not found at %s — playlist may appear empty in UI", xml_path)
             return
@@ -852,9 +852,7 @@ def flush_wal():
         db2.engine.dispose()
 
         # Verify WAL is actually empty
-        db_dir_path = os.path.join(os.environ.get("APPDATA", ""), "Pioneer", "rekordbox")
-        wal_path = os.path.join(db_dir_path, "master.db-wal")
-        wal_size = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
+        wal_size = os.path.getsize(REKORDBOX_WAL) if os.path.exists(REKORDBOX_WAL) else 0
         logger.info("WAL checkpoint complete — WAL size: %d bytes", wal_size)
     except Exception as e:
         logger.error("WAL checkpoint failed: %s", e)

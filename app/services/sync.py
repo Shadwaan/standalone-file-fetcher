@@ -14,6 +14,10 @@ from datetime import datetime
 from pathlib import Path
 
 from models.track import TrackInfo
+from services import app_config
+from services.platform_paths import (
+    is_rekordbox_running as _platform_is_rekordbox_running,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,15 +133,41 @@ class SyncOrchestrator:
         return index
 
     def _is_rekordbox_running(self) -> bool:
-        """Check if Rekordbox is running."""
-        import psutil
-        for proc in psutil.process_iter(['name']):
-            try:
-                if 'rekordbox' in proc.info['name'].lower():
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        return False
+        """Check if Rekordbox is running (cross-platform via platform_paths)."""
+        return _platform_is_rekordbox_running()
+
+    def stop_syncing_playlist(self, playlist_id_or_name: str) -> dict:
+        """Remove a playlist from sync_state. Does NOT touch Rekordbox/Traktor.
+
+        Accepts either the Spotify playlist ID (key in self._state['playlists'])
+        or the user-facing display name. Re-prefixing the playlist with FF in
+        Spotify and re-syncing will pick it up again.
+        """
+        playlists = self._state.get("playlists", {})
+        if not playlists:
+            return {"removed": False, "reason": "no playlists in sync state"}
+
+        target_id = None
+        if playlist_id_or_name in playlists:
+            target_id = playlist_id_or_name
+        else:
+            for pid, pdata in playlists.items():
+                if pdata.get("name") == playlist_id_or_name or pdata.get("display_name") == playlist_id_or_name:
+                    target_id = pid
+                    break
+
+        if target_id is None:
+            return {"removed": False, "reason": f"playlist not found: {playlist_id_or_name}"}
+
+        removed = playlists.pop(target_id)
+        self._save_state()
+        logger.info("Stopped syncing playlist: %s (id=%s)", removed.get("name", target_id), target_id)
+        return {
+            "removed": True,
+            "playlist_id": target_id,
+            "name": removed.get("name"),
+            "tracks_dropped_from_state": len(removed.get("tracks", {})),
+        }
 
     def _do_sync(self) -> dict:
         """Execute the full sync pipeline."""
@@ -153,23 +183,26 @@ class SyncOrchestrator:
         from services.downloader import download_track
         from services import rekordbox as rb
 
-        music_folder = os.getenv("MUSIC_FOLDER", "D:/Music Backup/Incoming")
+        music_folder = app_config.get_music_folder()
         prefix = os.getenv("PLAYLIST_PREFIX", "FF")
 
-        # Traktor sync is opt-in. Set ENABLE_TRAKTOR=1 in .env to keep
-        # collection.nml in sync with Rekordbox. Default off — sff currently
-        # only writes to Rekordbox. The traktor service code in services/traktor.py
-        # is preserved intact for when this is re-enabled.
-        enable_traktor = os.getenv("ENABLE_TRAKTOR", "0").lower() in ("1", "true", "yes", "on")
+        # Traktor sync is opt-in via UI checkbox (or legacy ENABLE_TRAKTOR=1 env).
+        # The traktor service code is preserved intact regardless of toggle state.
+        enable_traktor = app_config.get_sync_to_traktor()
         tk = None
         if enable_traktor:
             from services import traktor as tk
             logger.info("Traktor sync ENABLED")
         else:
-            logger.info("Traktor sync disabled (set ENABLE_TRAKTOR=1 to enable)")
+            logger.info("Traktor sync disabled (toggle 'Sync to Traktor' in the UI to enable)")
 
-        # Build file index across all music directories for duplicate detection
-        search_dirs = [music_folder, "D:/Music Backup"]
+        # Build file index across all music directories for duplicate detection.
+        # Also scan the parent of music_folder so legacy MP3s outside Incoming/
+        # still get caught by dedup.
+        parent_dir = str(Path(music_folder).parent)
+        search_dirs = [music_folder]
+        if parent_dir and parent_dir != music_folder:
+            search_dirs.append(parent_dir)
         self.progress.phase = "indexing"
         self.progress.message = "Scanning music directories..."
         file_index = self._build_file_index(search_dirs)
@@ -243,7 +276,10 @@ class SyncOrchestrator:
 
                     # Track in state
                     if pl_id not in self._state["playlists"]:
-                        self._state["playlists"][pl_id] = {"tracks": {}, "snapshot_id": ""}
+                        self._state["playlists"][pl_id] = {"tracks": {}, "snapshot_id": "", "name": pl_name, "display_name": display_name}
+                    else:
+                        self._state["playlists"][pl_id]["name"] = pl_name
+                        self._state["playlists"][pl_id]["display_name"] = display_name
                     self._state["playlists"][pl_id]["tracks"][track.spotify_id] = {
                         "filename": Path(existing_path).name if existing_path else track.filename,
                         "file_path": existing_path or "",
@@ -315,7 +351,10 @@ class SyncOrchestrator:
 
                 # Track in state
                 if pl_id not in self._state["playlists"]:
-                    self._state["playlists"][pl_id] = {"tracks": {}, "snapshot_id": ""}
+                    self._state["playlists"][pl_id] = {"tracks": {}, "snapshot_id": "", "name": pl_name, "display_name": display_name}
+                else:
+                    self._state["playlists"][pl_id]["name"] = pl_name
+                    self._state["playlists"][pl_id]["display_name"] = display_name
                 self._state["playlists"][pl_id]["tracks"][track.spotify_id] = {
                     "filename": dest_path.name,
                     "file_path": file_path,
@@ -355,7 +394,10 @@ class SyncOrchestrator:
 
             # Update state
             if pl_id not in self._state["playlists"]:
-                self._state["playlists"][pl_id] = {"tracks": {}, "snapshot_id": ""}
+                self._state["playlists"][pl_id] = {"tracks": {}, "snapshot_id": "", "name": pl_name, "display_name": display_name}
+            else:
+                self._state["playlists"][pl_id]["name"] = pl_name
+                self._state["playlists"][pl_id]["display_name"] = display_name
             self._state["playlists"][pl_id]["snapshot_id"] = pl.get("snapshot_id", "")
 
         self.progress.status = "done"
