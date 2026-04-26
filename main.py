@@ -53,8 +53,12 @@ def _get_orchestrator():
 
 @app.get("/")
 async def index():
-    """Serve the frontend UI."""
-    return FileResponse(str(frontend_dir / "index.html"))
+    """Serve the frontend UI. Cache-Control: no-cache forces the browser to
+    revalidate, so users see UI changes immediately after a sff update."""
+    return FileResponse(
+        str(frontend_dir / "index.html"),
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.post("/api/sync")
