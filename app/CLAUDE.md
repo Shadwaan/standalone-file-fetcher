@@ -480,20 +480,107 @@ db.session.commit()
 
 ---
 
-## Running
-```bash
-cd D:/Code/standalone-file-fetcher
-pip install -r requirements.txt
-python main.py
-# Open http://localhost:8899, click Sync or Sync (USB)
+## Repo layout (post-restructure 2026-04-26)
+
+All technical code lives in `app/`. Launchers + README live at the repo root.
+
+```
+/
+├── README.md           ← end-user doc (zero-config flow)
+├── start.command       ← Mac launcher (auto-bootstraps venv, auto-shutdown)
+├── start.bat           ← Windows launcher (same)
+└── app/                ← everything technical
+    ├── main.py
+    ├── requirements.txt
+    ├── .env.example    ← optional power-user overrides only
+    ├── services/
+    │   ├── platform_paths.py   ← cross-platform path/process resolution
+    │   ├── app_config.py       ← user prefs (music_folder, sync_to_traktor)
+    │   ├── spotify.py          ← uses SpotifyPKCE (no Client Secret)
+    │   ├── sync.py             ← orchestrator, has stop_syncing_playlist()
+    │   ├── downloader.py, rekordbox.py, traktor.py
+    │   └── analyzer.py         ← unused (legacy librosa code)
+    ├── frontend/index.html
+    ├── models/
+    ├── SETUP.md, CLAUDE.md, PRD.md, DEBUG_LOG.md
 ```
 
-## State
-- `sync_state.json` — tracks which Spotify IDs have been processed per playlist, stores file paths
-- `.spotify_cache` — Spotify OAuth token (auto-refreshes)
-- Clearing `sync_state.json` forces re-check of all tracks (but duplicate detection prevents re-downloads)
+**Files no longer present** (deleted in commit 67e59f0): `services/usb_detect.py`, `services/usb_export.py`, `services/rekordbox_auto.py`. Don't try to reference them.
+
+## Running
+
+```bash
+# Easiest: from the repo root, double-click start.command (Mac) or
+# start.bat (Windows). They auto-detect Python (>= 3.10), create app/.venv,
+# pip-install deps, run app/main.py with AUTO_SHUTDOWN_IDLE=20.
+
+# Manual (developer mode):
+cd app
+.venv/bin/python main.py             # Mac/Linux
+.venv\Scripts\python.exe main.py     # Windows
+# Or with bootstrap if you blew away .venv:
+#   python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+
+Server hosts on `http://localhost:8899`. Click Sync. Heartbeat from the page keeps it alive; close tab → server exits ~20s later.
+
+## Cross-platform notes
+
+- **Path resolution**: `app/services/platform_paths.py` is the single source of truth. It auto-detects Rekordbox base dir (`%APPDATA%/Pioneer/rekordbox` on Win, `~/Library/Pioneer/rekordbox` on Mac), Traktor NML path, ffmpeg location, etc. Never hardcode platform paths in other modules — import from `platform_paths`.
+- **Rekordbox 7 verified working** with pyrekordbox 0.4.4 on macOS (read + write).
+- **Windows-only deps**: `pywinauto`, `pygetwindow`, `pyautogui` were removed from requirements when `rekordbox_auto.py` was deleted. Don't reintroduce them.
+
+## Spotify auth (PKCE flow)
+
+`app/services/spotify.py` uses `spotipy.oauth2.SpotifyPKCE`, not `SpotifyOAuth`. No Client Secret anywhere. Hardcoded `DEFAULT_CLIENT_ID = "ee8d13f0effb403ca47b7fe518b55633"` (sff's shared dev app — public by design); env override via `SPOTIFY_CLIENT_ID` in `app/.env` for power users / BYO-app workaround.
+
+Spotify dev mode caps the shared app at **5 named users**. Extended Quota Mode is closed to individuals (May 2025 policy change). If sff needs to reach more than 5 users, the documented workaround is "user creates their own Spotify dev app and overrides Client ID in `.env`" — scales infinitely.
+
+## Settings architecture
+
+Three places where settings live, in order of precedence:
+
+1. **`app/app_config.json`** (gitignored, written via UI): `music_folder`, `first_run_complete`, `sync_to_traktor`. Read via `services.app_config.get_*()` helpers, never raw JSON access.
+2. **`app/.env`** (gitignored, optional): power-user overrides. Most users have no `.env`.
+3. **`platform_paths.py` defaults**: platform-detected fallbacks.
+
+Traktor opt-in is now a UI checkbox (`app_config.sync_to_traktor`), NOT the legacy `ENABLE_TRAKTOR=1` env var (still works as fallback for migration).
+
+## Auto-shutdown
+
+Frontend pings `POST /api/heartbeat` every 5s. `app/main.py` watchdog exits the process after `AUTO_SHUTDOWN_IDLE` seconds without a heartbeat (default off; launchers set it to 20). Closing the browser tab → server dies → start.command/.bat exits → Terminal/cmd window auto-closes (osascript on Mac, just exits on Windows).
+
+## State files (all gitignored, all live in `app/`)
+
+- `app/sync_state.json` — per-playlist track tracking. Now also stores `name` and `display_name` per playlist (added for stop_syncing lookup).
+- `app/.spotify_cache` — PKCE token cache. Delete = forces re-auth (used by the Sign-out UI button → `POST /api/spotify/sign-out`).
+- `app/app_config.json` — user prefs (above).
+
+Clearing `sync_state.json` forces a full re-check; dedup still prevents re-downloads.
 
 ## Dependencies
+
 ```
-pip install fastapi uvicorn spotipy yt-dlp mutagen librosa numpy pyrekordbox python-dotenv requests psutil pyautogui pygetwindow pywinauto
+fastapi, uvicorn, spotipy, yt-dlp, mutagen, numpy, pyrekordbox,
+python-dotenv, requests, psutil
 ```
+
+`librosa` was removed (unused — see CLAUDE.md item 13). Windows GUI deps (`pywinauto`/`pygetwindow`/`pyautogui`) were removed with `rekordbox_auto.py`.
+
+## API endpoints (current)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET  | `/` | Frontend HTML (Cache-Control: no-cache) |
+| POST | `/api/sync` | Start sync (background) |
+| GET  | `/api/status` | Sync progress |
+| GET  | `/api/playlists` | Playlists from last sync |
+| GET  | `/api/playlists/tracked` | All playlists in sync_state.json |
+| POST | `/api/playlists/{id}/stop-syncing` | Remove from sync state (does NOT touch RB/Traktor) |
+| GET  | `/api/config` | Current config (paths, signed-in flags, platform) |
+| POST | `/api/config/music-folder` | Set music folder (appends `/Incoming`) |
+| POST | `/api/config/pick-folder` | Native folder dialog (tkinter, subprocess) |
+| POST | `/api/config/traktor` | Toggle sync_to_traktor |
+| POST | `/api/spotify/sign-out` | Delete .spotify_cache (force re-auth) |
+| POST | `/api/heartbeat` | Liveness ping (idle watchdog) |
+| GET  | `/api/health` | Health check |
