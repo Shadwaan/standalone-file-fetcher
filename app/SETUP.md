@@ -88,9 +88,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-This pulls in: fastapi, uvicorn, spotipy, yt-dlp, mutagen, librosa (unused but kept), numpy, pyrekordbox, python-dotenv, requests, psutil.
-
-> **Mac note:** if `librosa` fails to build (`llvmlite`/`numba` issues on Apple Silicon Python 3.12), skip it — sff doesn't actually use it: `grep -v librosa requirements.txt | pip install -r /dev/stdin`
+This pulls in: fastapi, uvicorn, spotipy, yt-dlp, mutagen, numpy, pyrekordbox, python-dotenv, requests, psutil.
 
 ### 4. Install ffmpeg
 Required by yt-dlp for MP3 conversion.
@@ -236,13 +234,13 @@ Click ✕ next to it in the **Tracked Playlists** card. Only removes it from `sy
 
 ```
 Spotify (FF playlists)
-    ↓ spotipy OAuth
+    ↓ spotipy PKCE
 sff (FastAPI, localhost:8899)
     ↓ yt-dlp + ffmpeg + mutagen
-Local MP3s (D:/Music Backup/Incoming/{playlist}/)
+Local MP3s (<user music folder>/Incoming/{playlist}/)
     ↓ pyrekordbox + masterPlaylists6.xml registration
 Rekordbox (master.db + ANLZ on first analyze)
-    ↓ optional: ENABLE_TRAKTOR=1
+    ↓ optional: UI checkbox "Sync to Traktor"
 Traktor (collection.nml, atomic write)
     ↓ Rekordbox's native "Export to Device" (NOT sff)
 USB pen drive (Device Library Plus + ANLZ)

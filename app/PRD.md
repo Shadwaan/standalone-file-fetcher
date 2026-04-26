@@ -5,7 +5,7 @@ A standalone application that bridges Spotify playlists to Rekordbox (and option
 
 USB export for CDJs is **out of scope** — use Rekordbox's native "Export to Device" instead (Device Library Plus / PDB are proprietary formats not feasible to write outside Rekordbox).
 
-Traktor sync is **opt-in** via `ENABLE_TRAKTOR=1` in `.env`. Default is off.
+Traktor sync is **opt-in** via the **Sync to Traktor** checkbox in the Config card (persists in `app/app_config.json`). The legacy `ENABLE_TRAKTOR=1` env var still works as a migration fallback. Default off.
 
 **Target User:** DJ SupahFunk — Professional DJ performing with Rekordbox/CDJ-3000 hardware, managing 4,800+ tracks across Rekordbox and Traktor.
 
@@ -30,7 +30,7 @@ Traktor sync is **opt-in** via `ENABLE_TRAKTOR=1` in `.env`. Default is off.
   - Strategy A: Exact filename match `"Artist - Title"`
   - Strategy B: Title field match + verify artist is in filepath OR ArtistID
   - Strategy C: Partial filename match — both artist AND title in filename
-- **Layer 2: File index** — recursively scan `D:/Music Backup` (and music folder + playlist subfolders) for matching filenames at sync start
+- **Layer 2: File index** — recursively scan the user's music folder + its parent directory (configured via UI, stored in `app_config.music_folder`) for matching filenames at sync start
 - **Layer 3: Music folder** — check playlist subfolder path, then root music folder path
 - Only download if ALL three layers find no match
 - If Rekordbox match found, skip download and just add existing track to playlist
@@ -44,7 +44,7 @@ Traktor sync is **opt-in** via `ENABLE_TRAKTOR=1` in `.env`. Default is off.
 - **CRITICAL:** Must pass `ffmpeg_location` directly to yt-dlp options — PATH alone is unreliable
 - ffmpeg installed at: `C:\Users\Lenovo\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin`
 - Tag with ID3 metadata from Spotify (artist, title, album, artwork via mutagen)
-- **Files organized by playlist**: saved to `D:/Music Backup/Incoming/{PlaylistName}/Artist - Title.mp3`
+- **Files organized by playlist**: saved to `<music_folder>/{PlaylistName}/Artist - Title.mp3` (music_folder picked by user via UI on first run)
 
 ### 5. Import to Rekordbox (UNANALYZED)
 - **Rekordbox handles all audio analysis** — we do NOT use librosa for BPM/key/beatgrid
@@ -127,41 +127,14 @@ If you want this back, the old `services/usb_export.py` and `services/usb_detect
 
 ---
 
-## USB Drive Detection
+## USB Drive Detection — REMOVED
 
-### ⚠️ KNOWN UNRESOLVED ISSUE
-**USB detection is NOT robust.** It currently uses a hardcoded skip list of `{"C:", "D:", "E:"}` on this machine because there's no reliable way with stdlib to distinguish a removable USB drive from an SSD partition. The code does NOT actually check if a drive is removable — it just lists all drive letters that exist and filters by letter.
-
-**What goes wrong:**
-- E: is an SSD partition on this machine, not a removable drive
-- The code still detects E: as "connected USB" because it just checks `os.path.exists("E:/")`
-- Current workaround: `SKIP_DRIVES = {"C:", "D:", "E:"}` in `services/usb_detect.py`
-- This only works on THIS machine — breaks if user has a real USB at E:, or has different partition layout
-
-**Proper fix (not yet implemented):**
-Use Windows API via `ctypes` to check drive type:
-```python
-import ctypes
-drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{letter}:\\")
-# 2 = DRIVE_REMOVABLE (USB stick, SD card)
-# 3 = DRIVE_FIXED (hard drive, SSD)
-# 4 = DRIVE_REMOTE (network)
-# 5 = DRIVE_CDROM
-# Only accept drive_type == 2
-```
-This would let us auto-detect actual USB drives regardless of letter, and not need a hardcoded skip list.
-
-### Current Implementation
-- Scans drive letters E: through Z: on Windows
-- **Hardcoded skip: C:, D:, E:** — C: is system, D: is music storage, E: is SSD partition (fragile)
-- Uses `shutil.disk_usage()` for size info
-- Uses `wmic logicaldisk` to get volume name
-- Checks for existing PIONEER/ folder to flag as "has_rekordbox"
+This section described an unresolved issue in the old `services/usb_detect.py`. That file was deleted (commit 67e59f0) along with USB sync, so the issue is moot. If USB sync is ever revived, the proper fix uses Windows `GetDriveTypeW` (DRIVE_REMOVABLE = 2) instead of letter-based filtering — see git history for details.
 
 ---
 
 ## File Organization
-- Downloads go to `D:/Music Backup/Incoming/{PlaylistName}/Artist - Title.mp3`
+- Downloads go to `<music_folder>/{PlaylistName}/Artist - Title.mp3` (music_folder configured via UI)
 - Each FF playlist gets its own subfolder
 - Duplicate detection scans all subfolders recursively
 - Rekordbox FolderPath stores the full path including playlist subfolder
@@ -247,32 +220,47 @@ standalone-file-fetcher/
 ├── .env                    # Spotify creds + paths (DO NOT COMMIT)
 ├── .spotify_cache           # Spotify OAuth token cache
 ├── sync_state.json          # Tracks what's been synced (persists between runs)
-├── requirements.txt
-├── main.py                 # FastAPI server on port 8899
-├── frontend/
-│   └── index.html          # Single Sync button + status display
-├── services/
-│   ├── spotify.py          # Spotify OAuth + playlist discovery + track listing
-│   ├── downloader.py       # YouTube search + yt-dlp download + ffmpeg convert + ID3 tagging
-│   ├── analyzer.py         # librosa analysis (UNUSED — kept for reference, Rekordbox handles analysis)
-│   ├── rekordbox.py        # Rekordbox DB import (unanalyzed) + masterPlaylists6.xml registration + ANLZ writer (legacy) + WAL flush + playlist CRUD + artist+title dedupe
-│   ├── traktor.py          # Traktor NML import (unanalyzed) + atomic writes + playlist CRUD — only called when ENABLE_TRAKTOR=1
-│   └── sync.py             # Orchestrator: preflight → discover → dedupe → download → import → playlist → WAL flush (double)
-└── models/
-    └── track.py            # TrackInfo + AnalysisResult dataclasses
+├── README.md               # End-user instructions (repo root)
+├── start.command           # Mac launcher (auto-bootstrap, repo root)
+├── start.bat               # Windows launcher (repo root)
+└── app/                    # ALL technical code
+    ├── requirements.txt
+    ├── .env.example        # Optional power-user overrides only
+    ├── main.py             # FastAPI server on port 8899 + heartbeat watchdog
+    ├── frontend/
+    │   └── index.html      # Sync button, first-run modal, Config card,
+    │                       # Tracked Playlists with stop-syncing buttons
+    ├── services/
+    │   ├── platform_paths.py  # Cross-platform Rekordbox/Traktor/ffmpeg path resolution
+    │   ├── app_config.py      # User prefs: music_folder, sync_to_traktor, first_run_complete
+    │   ├── spotify.py         # SpotifyPKCE (no Client Secret) + playlist discovery
+    │   ├── downloader.py      # YouTube search + yt-dlp + ffmpeg convert + ID3 tagging
+    │   ├── analyzer.py        # librosa analysis (UNUSED — kept for reference)
+    │   ├── rekordbox.py       # Rekordbox DB import + masterPlaylists6.xml + ANLZ writer (legacy) + WAL flush + playlist CRUD + dedupe
+    │   ├── traktor.py         # Traktor NML import + atomic writes + playlist CRUD — only called when sync_to_traktor=true
+    │   └── sync.py            # Orchestrator + stop_syncing_playlist
+    └── models/
+        └── track.py           # TrackInfo + AnalysisResult dataclasses
 ```
 
 ## Dependencies
 ```
-fastapi, uvicorn, spotipy, yt-dlp, mutagen, librosa, numpy,
+fastapi, uvicorn, spotipy, yt-dlp, mutagen, numpy,
 pyrekordbox, python-dotenv, requests, psutil
 ```
 
 ## Running
+
 ```bash
-cd D:/Code/standalone-file-fetcher
-pip install -r requirements.txt
-python main.py
+# Easiest: from the repo root, double-click start.command (Mac) /
+# start.bat (Windows). They auto-detect Python (>= 3.10), bootstrap
+# app/.venv on first run, install deps, launch with auto-shutdown.
+
+# Manual / dev:
+cd app
+.venv/bin/python main.py             # Mac/Linux
+.venv\Scripts\python.exe main.py     # Windows
+
 # Open http://localhost:8899, click Sync
 ```
 
@@ -282,7 +270,7 @@ python main.py
 
 ### Flush WAL manually (if Rekordbox shows empty playlists)
 ```python
-cd "D:/Code/standalone-file-fetcher" && python -c "
+cd app && .venv/bin/python -c "
 from dotenv import load_dotenv; load_dotenv()
 from pyrekordbox import Rekordbox6Database
 from sqlalchemy import text

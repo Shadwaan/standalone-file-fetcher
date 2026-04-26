@@ -23,15 +23,15 @@ The `analyzer.py` file exists but is NOT used in the sync pipeline. It's kept fo
 
 **USB sync is REMOVED.** It used to write a Rekordbox-XML-on-USB format that CDJs couldn't actually use (CDJs need Device Library Plus or PDB, both proprietary). For real CDJ-ready USB drives, use Rekordbox's native "Export to Device" instead. Files removed: `services/usb_detect.py`, `services/usb_export.py`. See git history (commit `ac51935`) if you ever need to revive.
 
-**Traktor sync is OPT-IN.** Set `ENABLE_TRAKTOR=1` in `.env` to also write to `collection.nml`. Default off (Rekordbox-only). Code in `services/traktor.py` is preserved either way.
+**Traktor sync is OPT-IN.** The **Sync to Traktor** checkbox in the Config card (persists in `app/app_config.json` as `sync_to_traktor`) is the primary control. Legacy `ENABLE_TRAKTOR=1` env var still works as a migration fallback. Default off (Rekordbox-only). Code in `services/traktor.py` is preserved either way.
 
 ---
 
 ## File Organization
 
-Downloads are organized into playlist subfolders:
+Downloads are organized into playlist subfolders. The root is set by the user via the UI (`app_config.music_folder`); on Windows it's typically `D:/Music Backup/Incoming` for the original developer, on Mac it's typically `~/Music/Incoming`:
 ```
-D:/Music Backup/Incoming/
+<user music folder>/
 ├── Opening/
 │   ├── Jo Paciello - Fantasy.mp3
 │   └── ...
@@ -350,27 +350,11 @@ for _ in range(2):
 
 ---
 
-## USB Export Rules
+## USB Export Rules — REMOVED
 
-### Drive Detection (usb_detect.py)
-- Scan E: through Z: (not C: or D:)
-- Skip E: specifically (it's an SSD partition on this user's machine)
-- Use `shutil.disk_usage()` for size, `wmic` for volume name
+The "Sync (USB)" feature was removed (commit 67e59f0). Files `services/usb_detect.py` and `services/usb_export.py` no longer exist. Reason: it wrote a Rekordbox-XML-on-USB format that CDJs can't actually read — modern CDJs need Device Library Plus (DLP) or PDB, both proprietary. Real CDJ-ready USB drives must come from Rekordbox's native "Export to Device".
 
-### Export Flow (usb_export.py)
-1. Find FF playlists: iterate all DjmdPlaylist, check if any track in it is from `D:/Music Backup/Incoming/`
-2. Create `USB:/Contents/{PlaylistName}/` directories
-3. Copy audio files (skip if dest exists with same size)
-4. For analyzed tracks: copy ANLZ files from `%APPDATA%/Pioneer/rekordbox/share/PIONEER/USBANLZ/{uuid}/` to `USB:/PIONEER/USBANLZ/{new_uuid}/`
-5. **Rewrite PPTH tag** inside each ANLZ file to use USB-relative path (`Contents/{Playlist}/{file}`)
-6. Write `USB:/PIONEER/rekordbox/rekordbox.xml` with all playlists + tracks
-
-### PPTH Rewrite in ANLZ
-PPTH tag structure: `"PPTH"` (4 bytes) + header_len (4) + tag_len (4) + path_len (4) + path_bytes (UTF-16BE).
-Must also update the file header's total length field.
-
-### Limitation
-This approach does NOT create Device Library Plus format (`exportLibrary.db`). Only Rekordbox's native "Export to Device" creates that. For newer CDJs that require DLP, user must use Rekordbox's built-in export.
+If the user asks to revive USB sync: don't, unless they're prepared to reverse-engineer DLP/PDB. Steer them to Rekordbox's built-in export instead. The old code is in git history at commit `ac51935` if absolutely needed for reference.
 
 ---
 
@@ -386,8 +370,8 @@ This approach does NOT create Device Library Plus format (`exportLibrary.db`). O
 ## Duplicate Detection (3-layer, ALL require artist+title match)
 Before downloading any track:
 1. **Rekordbox DB**: `find_content_by_title(artist, title)` — three strategies, ALL requiring artist match
-2. **File index**: `_build_file_index()` — scans D:/Music Backup recursively at sync start
-3. **Music folder**: checks `Incoming/{PlaylistName}/track.filename` then `Incoming/track.filename`
+2. **File index**: `_build_file_index()` — scans the user's music folder + its parent directory recursively at sync start (paths come from `app_config.get_music_folder()`, NOT hardcoded)
+3. **Music folder**: checks `<music_folder>/<PlaylistName>/track.filename` then `<music_folder>/track.filename`
 
 If any layer matches, skip download. If Rekordbox match found, just add existing track to playlist.
 **NEVER match by title alone.**
@@ -410,7 +394,7 @@ If any layer matches, skip download. If Rekordbox match found, just add existing
 - Always pass `ffmpeg_location` in yt-dlp options
 - Post-process to MP3 320kbps
 - Tag with mutagen (TPE1, TIT2, TALB, TDRC, APIC for artwork)
-- Save to `D:/Music Backup/Incoming/{PlaylistName}/` subfolder
+- Save to `<music_folder>/{PlaylistName}/` subfolder (music_folder from `app_config`)
 
 ---
 
@@ -597,7 +581,7 @@ python-dotenv, requests, psutil
 ## GUI features — non-obvious behaviors and gotchas
 
 ### First-run music folder modal
-Triggered automatically when `app_config.first_run_complete == False`. User picks a parent folder; `app_config.set_music_folder()` appends `/Incoming` if not already present (so `~/Music` → `~/Music/Incoming`). The "Incoming" suffix is sff's convention — code in `sync.py` and `usb_export.py` (legacy) assume it. Don't bypass the helper.
+Triggered automatically when `app_config.first_run_complete == False`. User picks a parent folder; `app_config.set_music_folder()` appends `/Incoming` if not already present (so `~/Music` → `~/Music/Incoming`). The "Incoming" suffix is sff's convention — `sync.py` assumes the configured path is the working directory for downloads. Don't bypass the helper.
 
 ### Folder picker (Browse... button)
 Implemented as a **subprocess** that runs tkinter, NOT as `loop.run_in_executor`. **Reason:** tkinter on macOS REQUIRES the main thread of its process. uvicorn workers are not the main thread, so calling `tk.Tk()` from a worker thread crashes the entire uvicorn worker (the user sees "Failed to fetch" and the server is dead). The subprocess gets its own main thread, sidesteps the macOS restriction, and works on Windows too.

@@ -434,3 +434,67 @@ if enable_traktor:
 ### 13.5 Honest meta-observation
 - I built features (USB sync, GUI automation) without confirming the user actually needed them work the way I imagined. USB sync in particular was building the wrong thing — I knew CDJs needed DLP/PDB but I built XML export anyway because it was achievable. That's solving the easier-but-wrong problem.
 - The right pattern: when a feature requires reverse-engineering a proprietary format, the answer is usually "use the official tool" not "build a worse version that ships incomplete data."
+
+---
+
+## Section 14: Post-restructure overhaul (2026-04-26, Mac session)
+
+Mac-side session that added cross-platform support, restructured the repo for end-user friendliness, switched Spotify auth to PKCE, and shipped a polished GUI. **Verified on Mac with Rekordbox 7 (pyrekordbox 0.4.4 reads it cleanly). NOT YET verified on the Windows + Rekordbox 6 machine.**
+
+### 14.1 Repo restructure
+- All technical code moved into `app/` subdirectory (history preserved via `git mv`)
+- `start.command` (Mac) and `start.bat` (Windows) at repo root, double-click to run
+- New `README.md` at root for end users; `app/SETUP.md` is contributor-only
+- See git commits `c08f52d` and `1af08ba`
+
+### 14.2 Cross-platform path resolution (`services/platform_paths.py`)
+- Replaced hardcoded `C:/...`, `D:/...`, `%APPDATA%` references throughout services/
+- Auto-detects Rekordbox base dir, Traktor NML, ffmpeg location per platform
+- Mac: `~/Library/Pioneer/rekordbox/`, `~/Library/Application Support/Native Instruments/Traktor*/`, `shutil.which("ffmpeg")` + brew prefix fallbacks (incl. user-local `~/.local/homebrew/bin`)
+- Windows: existing `%APPDATA%`/Documents-folder paths preserved via `if sys.platform == "win32"` branches
+- `is_rekordbox_running()` is now cross-platform (compares lowercased process names against `{"rekordbox.exe", "rekordbox"}`)
+
+### 14.3 Auto-bootstrapping launchers
+- start.command/start.bat detect Python 3.10+ (Mac search includes user-local brew at `~/.local/homebrew/bin/`), create `app/.venv` on first run, `pip install -r requirements.txt`, then run main.py with `AUTO_SHUTDOWN_IDLE=20`
+- ~75-second first launch on Mac (compiling deps); subsequent launches instant
+- Clean exit (browser closed → server died) → `osascript ... close (front window)` on Mac, just `exit` on Windows
+
+### 14.4 Heartbeat-based auto-shutdown
+- Frontend pings `POST /api/heartbeat` every 5s while page is open
+- Server's `_idle_watchdog()` async task starts on uvicorn startup ONLY if `AUTO_SHUTDOWN_IDLE` env var > 0; sends SIGINT to itself if no heartbeat for that many seconds
+- Closing the tab → no more heartbeats → server exits cleanly → launcher closes Terminal/cmd window
+
+### 14.5 Spotify auth: OAuth → PKCE
+- `app/services/spotify.py` switched from `SpotifyOAuth` to `SpotifyPKCE`
+- Removed all Client Secret references. Hardcoded `DEFAULT_CLIENT_ID = "ee8d13f0effb403ca47b7fe518b55633"` (sff's shared dev app — public by design)
+- Env override via `SPOTIFY_CLIENT_ID` in `app/.env` for the BYO-app workaround
+- **Migration gotcha:** old `.spotify_cache` files (issued by SpotifyOAuth) CANNOT be refreshed by SpotifyPKCE — delete the cache to force a fresh PKCE OAuth flow. UI exposes this via the **Sign out** button.
+- Spotify Dev Mode cap is **5 named users** (down from 25 since May 2025). Extended Quota Mode is closed to individuals — see `CLAUDE.md` "Spotify auth (PKCE flow)" section for the full policy.
+
+### 14.6 New GUI (`app/frontend/index.html`)
+- First-run music-folder modal (triggers when `app_config.first_run_complete == False`)
+- Native folder picker via tkinter — **runs in a SUBPROCESS, not `loop.run_in_executor`**. macOS bug we hit: tkinter requires the process main thread; thread-pool calls crash the uvicorn worker (user saw "Picker failed: Failed to fetch"). Subprocess gets its own main thread. Brew Python lacks tkinter by default — `brew install python-tk@3.13` fixes it; otherwise text-input fallback works.
+- "Tracked Playlists" card showing `sync_state.json` contents with ✕ stop-syncing buttons (calls new `POST /api/playlists/{id}/stop-syncing` — only removes from sync_state, NEVER touches RB/Traktor)
+- "Sync to Traktor" checkbox (replaces legacy `ENABLE_TRAKTOR=1` env var; legacy still works as fallback)
+- "Sign out" link in Spotify row of Config card → `POST /api/spotify/sign-out` deletes `.spotify_cache`
+
+### 14.7 New module: `app/services/app_config.py`
+- Persists user prefs in `app/app_config.json` (gitignored): `music_folder`, `first_run_complete`, `sync_to_traktor`
+- `set_music_folder()` auto-appends `/Incoming` if not already present
+- Resolution order for music folder: app_config.json → MUSIC_FOLDER env → platform default
+
+### 14.8 Removed: librosa
+- Was unused (only `analyzer.py` imports it, and `analyzer.py` is never called)
+- Was also failing to install on Apple Silicon Python 3.12 (llvmlite/numba build issues)
+- Removed from `requirements.txt`. `analyzer.py` kept on disk for reference (silent dead code).
+
+### 14.9 What to watch for on Windows + Rekordbox 6 first run
+- `start.bat` first-run will create `app/.venv` and install deps. Should work — Windows Python 3.13 + pip is reliable.
+- Old Spotify cache pre-restructure was at `<repo_root>/.spotify_cache`; post-restructure it's at `app/.spotify_cache`. If you accidentally end up with both, OR migrated the old one, **delete it** — old SpotifyOAuth-issued tokens cannot be refreshed by SpotifyPKCE. Click **Sign out** in the UI then re-authorize.
+- pyrekordbox 0.4.4 originally written for Rekordbox 6 (v7 was the open question, verified working on Mac). v6 should be fine.
+- Auto-shutdown: clean-exit closing was tested on Mac. On Windows, cmd.exe's exit codes for Ctrl+C are different (`-1073741510` and `3221225786` are both checked in start.bat); window should still close cleanly.
+- If Windows auto-shutdown hangs: confirm `AUTO_SHUTDOWN_IDLE=20` is set in the env Python sees — `set` in batch is session-local but inherited by child processes, should work.
+
+### 14.10 What still uses old defaults
+- Hardcoded `D:/Music Backup/Incoming` in old `app/.env` → ignored at runtime since `app_config.get_music_folder()` checks `app_config.json` FIRST. Harmless dead config.
+- Old `inspect_*.py`, `fix_*.py`, `purge_*.py`, `reencode_*.py` dev scripts at `app/` still have hardcoded `D:/...` paths. They're personal one-off utilities, not part of the sync pipeline. Leave alone unless re-running them.
