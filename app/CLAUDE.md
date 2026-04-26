@@ -594,6 +594,38 @@ python-dotenv, requests, psutil
 
 `librosa` was removed (unused — see CLAUDE.md item 13). Windows GUI deps (`pywinauto`/`pygetwindow`/`pyautogui`) were removed with `rekordbox_auto.py`.
 
+## GUI features — non-obvious behaviors and gotchas
+
+### First-run music folder modal
+Triggered automatically when `app_config.first_run_complete == False`. User picks a parent folder; `app_config.set_music_folder()` appends `/Incoming` if not already present (so `~/Music` → `~/Music/Incoming`). The "Incoming" suffix is sff's convention — code in `sync.py` and `usb_export.py` (legacy) assume it. Don't bypass the helper.
+
+### Folder picker (Browse... button)
+Implemented as a **subprocess** that runs tkinter, NOT as `loop.run_in_executor`. **Reason:** tkinter on macOS REQUIRES the main thread of its process. uvicorn workers are not the main thread, so calling `tk.Tk()` from a worker thread crashes the entire uvicorn worker (the user sees "Failed to fetch" and the server is dead). The subprocess gets its own main thread, sidesteps the macOS restriction, and works on Windows too.
+
+If tkinter isn't available (brew bare `python@3.13` ships without it; needs `python-tk@3.13` or python.org's installer), the subprocess exits with stderr; the frontend falls back gracefully to "paste the path manually" and shows that hint to the user.
+
+### Stop-syncing button (per playlist)
+`POST /api/playlists/{id}/stop-syncing` removes the playlist from `sync_state.json` ONLY. It does NOT:
+- Delete the playlist in Rekordbox
+- Delete the playlist in Traktor
+- Touch the downloaded MP3s on disk
+
+This is intentional and a NON-NEGOTIABLE safety rule (see Safety Rules section). The user can re-add the FF prefix in Spotify and the playlist gets rediscovered + re-tracked on the next sync. State lookup supports both playlist ID and display_name.
+
+### Tracked Playlists card
+Reads `sync_state.json` directly (not the last sync's progress). Shows what sff *thinks it's syncing*, persistent across restarts. This is distinct from the "Playlists" card which only shows the most recent sync run.
+
+### Sign out of Spotify (button in Config card)
+Click → confirmation dialog → `POST /api/spotify/sign-out` → deletes `app/.spotify_cache`. Use case: switching to a different Spotify account. Does NOT revoke the OAuth grant on Spotify's side; the user has to visit `spotify.com/account/apps` for a full revoke (the dialog text mentions this).
+
+The `/api/config` response includes `spotify_signed_in: bool` derived from `.spotify_cache` file presence — purely a "does the cache exist" check, no API call to Spotify.
+
+### Traktor opt-in checkbox
+Persists in `app_config.json` via `app_config.set_sync_to_traktor()`. The legacy `ENABLE_TRAKTOR=1` env var still works as a fallback (in `app_config.get_sync_to_traktor()`) for users upgrading from older versions, but the checkbox is the primary control. The Config card shows a green checkmark + path when on, or grey "Off" when off, with a ⚠️ warning if the resolved Traktor NML path doesn't exist on disk.
+
+### Auto-shutdown (heartbeat)
+Frontend's `setInterval(..., 5000)` ping + server's idle watchdog (see Auto-shutdown section above). The launchers set `AUTO_SHUTDOWN_IDLE=20`; manual `python main.py` runs leave it off (env var unset = 0 = disabled). Don't enable this by default — developers running the server for testing don't want it dying when they switch tabs.
+
 ## API endpoints (current)
 
 | Method | Path | Purpose |
