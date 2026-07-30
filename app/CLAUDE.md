@@ -363,7 +363,7 @@ If the user asks to revive USB sync: don't, unless they're prepared to reverse-e
 - LOCATION: `VOLUME` + `DIR` (/:separated/:) + `FILE`
 - Import tracks unanalyzed — just file entry with artist, title, bitrate
 - Traktor will analyze on first load
-- New playlists: insert NODE at index 0 of root PLAYLISTS node
+- New playlists: insert `NODE TYPE="PLAYLIST"` inside `PLAYLISTS → NODE $ROOT → SUBNODES` (NOT as a direct child of the $ROOT node — Traktor ignores those and deletes them on save), update `SUBNODES COUNT` to match child count, and give `PLAYLIST` a real `uuid4().hex` UUID. Verified on Traktor Pro 3 (3.5.1, Windows) — see DEBUG_LOG section 15.
 
 ---
 

@@ -498,3 +498,17 @@ Mac-side session that added cross-platform support, restructured the repo for en
 ### 14.10 What still uses old defaults
 - Hardcoded `D:/Music Backup/Incoming` in old `app/.env` → ignored at runtime since `app_config.get_music_folder()` checks `app_config.json` FIRST. Harmless dead config.
 - Old `inspect_*.py`, `fix_*.py`, `purge_*.py`, `reencode_*.py` dev scripts at `app/` still have hardcoded `D:/...` paths. They're personal one-off utilities, not part of the sync pipeline. Leave alone unless re-running them.
+
+## 15. Traktor playlists silently discarded (verified on Traktor Pro 3, v3.5.1 Windows) — FIXED 2026-07-30
+
+**Symptom:** sff-created playlists never appeared in Traktor. Track ENTRYs imported into the collection fine, but the Playlists tree showed only Traktor's stock playlists (_LOOPS, _RECORDINGS, Preparation). On next Traktor exit, the playlist nodes were gone from collection.nml entirely — Traktor discards what it doesn't parse when it rewrites the file on save.
+
+**Root cause (two violations in `find_or_create_playlist`):**
+1. The new `NODE TYPE="PLAYLIST"` was inserted as a direct child of the `$ROOT` folder NODE — i.e. a *sibling* of `SUBNODES`. Traktor only reads playlists nested *inside* `$ROOT → SUBNODES`.
+2. `SUBNODES` carries a `COUNT` attribute that must equal its child NODE count; it was never updated.
+
+Also: `PLAYLIST UUID=""` — now set to a real `uuid4().hex` like Traktor's own.
+
+**Fix:** insert into (or create) the `SUBNODES` element and set `COUNT` from the actual child count after insert. Verified structure round-trips a Traktor open/close with playlists intact.
+
+**How this was missed:** our own verification parsed the XML with `root.iter('NODE')`, which happily finds nodes anywhere in the tree — the file "looked correct" while being invalid for Traktor. When verifying NML playlist structure, always check placement (`PLAYLISTS → NODE $ROOT → SUBNODES → NODE`) and `COUNT`/`ENTRIES` attribute consistency, not just node existence.

@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import tempfile
+import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -330,8 +331,13 @@ def find_or_create_playlist(playlist_name: str) -> bool:
             if node.get("TYPE") == "PLAYLIST" and node.get("NAME") == playlist_name:
                 return True
 
-        # Create new playlist at the beginning (insert at index 0 for top)
-        subnodes = list(root_node)
+        # Playlists must live inside the $ROOT folder's SUBNODES element —
+        # Traktor ignores (and deletes on save) NODEs placed directly under
+        # the root NODE — and SUBNODES.COUNT must match its child count.
+        subnodes_elem = root_node.find("SUBNODES")
+        if subnodes_elem is None:
+            subnodes_elem = ET.SubElement(root_node, "SUBNODES")
+
         new_node = ET.Element("NODE")
         new_node.set("TYPE", "PLAYLIST")
         new_node.set("NAME", playlist_name)
@@ -339,10 +345,11 @@ def find_or_create_playlist(playlist_name: str) -> bool:
         playlist_elem = ET.SubElement(new_node, "PLAYLIST")
         playlist_elem.set("ENTRIES", "0")
         playlist_elem.set("TYPE", "LIST")
-        playlist_elem.set("UUID", "")
+        playlist_elem.set("UUID", uuid.uuid4().hex)
 
-        # Insert at beginning
-        root_node.insert(0, new_node)
+        # Insert at beginning of SUBNODES and fix its COUNT
+        subnodes_elem.insert(0, new_node)
+        subnodes_elem.set("COUNT", str(len(subnodes_elem.findall("NODE"))))
 
         _safe_write_nml(tree, nml_path)
         logger.info("Created Traktor playlist: %s (at top)", playlist_name)
