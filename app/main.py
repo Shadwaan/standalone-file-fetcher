@@ -80,6 +80,21 @@ async def start_sync():
     return {"status": "started", "message": "Sync started"}
 
 
+@app.post("/api/retry-failed")
+async def retry_failed():
+    """Re-attempt only the downloads that failed in earlier syncs (background)."""
+    global _sync_task
+    orchestrator = _get_orchestrator()
+
+    if orchestrator.progress.status == "running":
+        return JSONResponse({"error": "Sync already in progress"}, status_code=409)
+
+    loop = asyncio.get_event_loop()
+    _sync_task = loop.run_in_executor(None, orchestrator.run_retry_failed)
+
+    return {"status": "started", "message": "Retrying failed downloads"}
+
+
 @app.get("/api/status")
 async def get_status():
     """Get current sync status and progress."""

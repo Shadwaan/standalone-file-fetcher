@@ -389,6 +389,8 @@ If any layer matches, skip download. If Rekordbox match found, just add existing
 
 ## YouTube Download Rules
 - Try 5 search query variants: full artist, first artist only, title only
+- `_search_youtube` returns ranked candidates (in-tolerance first, closest first). `download_track` tries them in order and **falls through to the next candidate on failure**, capped at `MAX_DOWNLOAD_ATTEMPTS` (5) per track. `extract_flat` search lists removed/region-blocked videos, so the top match can be dead — never give up after the first candidate (DEBUG_LOG 17).
+- `_download_audio` deletes leftover `<safe_filename>.*` files before each attempt. yt-dlp resumes `.part` files by default, so a failed candidate's partial file would otherwise be spliced onto the next video's audio.
 - Use `extract_flat=True` for search to avoid unavailable video crashes
 - Duration tolerance: 30 seconds
 - Always pass `ffmpeg_location` in yt-dlp options
@@ -564,6 +566,7 @@ Frontend pings `POST /api/heartbeat` every 5s. `app/main.py` watchdog exits the 
 ## State files (all gitignored, all live in `app/`)
 
 - `app/sync_state.json` — per-playlist track tracking. Now also stores `name` and `display_name` per playlist (added for stop_syncing lookup).
+  Also holds a `failed` map (`"<playlist_id>:<spotify_id>"` → artist, title, playlist, attempts): the retry queue behind the **Retry failed** button. Entries are added on download failure and removed when the track later syncs (by retry OR full sync) or leaves its Spotify playlist.
 - `app/.spotify_cache` — PKCE token cache. Delete = forces re-auth (used by the Sign-out UI button → `POST /api/spotify/sign-out`).
 - `app/app_config.json` — user prefs (above).
 
@@ -587,6 +590,11 @@ Triggered automatically when `app_config.first_run_complete == False`. User pick
 Implemented as a **subprocess** that runs tkinter, NOT as `loop.run_in_executor`. **Reason:** tkinter on macOS REQUIRES the main thread of its process. uvicorn workers are not the main thread, so calling `tk.Tk()` from a worker thread crashes the entire uvicorn worker (the user sees "Failed to fetch" and the server is dead). The subprocess gets its own main thread, sidesteps the macOS restriction, and works on Windows too.
 
 If tkinter isn't available (brew bare `python@3.13` ships without it; needs `python-tk@3.13` or python.org's installer), the subprocess exits with stderr; the frontend falls back gracefully to "paste the path manually" and shows that hint to the user.
+
+### Retry failed button
+Appears under Sync as **Retry failed (N)** only while the `failed` queue in `sync_state.json` is non-empty; hover lists the tracks. `POST /api/retry-failed` → `SyncOrchestrator.run_retry_failed()`: fetches fresh track data for only the affected playlists (positions may have shifted), runs each queued track through **`_process_track` — the same per-track pipeline full sync uses**, re-syncs those playlists' order, then flushes WAL in a `finally` so a mid-run error can't leave imports invisible. Refuses while Rekordbox is running, like sync. Does not update `last_sync`.
+
+**Never give retry its own import code.** Full sync and retry share `_process_track`, `_mark_track_synced` and `_sync_playlist_order` precisely so Rekordbox import hygiene can't drift between them.
 
 ### Stop-syncing button (per playlist)
 `POST /api/playlists/{id}/stop-syncing` removes the playlist from `sync_state.json` ONLY. It does NOT:
@@ -616,6 +624,7 @@ Frontend's `setInterval(..., 5000)` ping + server's idle watchdog (see Auto-shut
 |---|---|---|
 | GET  | `/` | Frontend HTML (Cache-Control: no-cache) |
 | POST | `/api/sync` | Start sync (background) |
+| POST | `/api/retry-failed` | Re-attempt only queued failed downloads (background) |
 | GET  | `/api/status` | Sync progress |
 | GET  | `/api/playlists` | Playlists from last sync |
 | GET  | `/api/playlists/tracked` | All playlists in sync_state.json |

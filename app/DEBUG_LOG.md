@@ -630,3 +630,52 @@ drag-import parity fields). Auto-upgrading it on launch would silently change DB
 write behaviour with no test coverage — precisely how a future DEBUG_LOG section
 gets written. Note `requirements.txt` currently declares `pyrekordbox>=0.3.0`,
 a floor, even though 0.4.4 is the verified version; consider pinning it exactly.
+
+## 17. Deterministic download failures + no way to retry just the failures — FIXED 2026-09-28
+
+### 17.1 Symptom
+`Breaka – Desire Path` failed on three consecutive full syncs; `Fatima Yamaha,
+JAEL – What's a Girl to Do (JAEL Remix)` failed once. The only recovery was
+another full sync, which rescans every FF playlist.
+
+### 17.2 Two different causes
+- **Breaka — deterministic.** Search ranked `nUpvS7Zl7JU` as the best duration
+  match, but that video is `This video is not available` (removed /
+  region-blocked). `extract_flat=True` search doesn't check availability, so dead
+  videos appear in results. `download_track` took the single best match and gave
+  up when it failed — so every retry picked the same dead video. **No amount of
+  retrying could ever fix this.**
+- **JAEL Remix — transient.** Same code path downloaded it fine minutes later.
+
+### 17.3 Fixes
+1. **Candidate fallback** (`downloader.py`). `_search_youtube` now returns ranked
+   candidates; `download_track` tries them in order across all query variants,
+   capped at 5 attempts. Success path is unchanged (first working candidate wins,
+   same as before). Breaka now resolves via `sDyRixHhSnA` (266 s vs Spotify's
+   252 s, within the 30 s tolerance).
+2. **Partial-file guard.** Before each attempt, `_download_audio` deletes leftover
+   `<safe_filename>.*` in the temp dir. yt-dlp resumes `.part` files by default; a
+   candidate failing mid-download would otherwise get the next video's audio
+   appended — a silently corrupted, spliced track.
+3. **Retry queue + button.** Failures are recorded in `sync_state.json` → `failed`.
+   `POST /api/retry-failed` re-runs only those tracks. The per-track body of the
+   sync loop was extracted into `_process_track()` so sync and retry share ONE
+   import path (plus `_mark_track_synced`, `_sync_playlist_order`). Retry flushes
+   WAL in `finally`.
+
+### 17.4 Verified
+Seeded the queue with the two tracks (they failed before the queue existed),
+clicked the real button in the browser: 2 downloaded, 2 imported, 0 failed;
+queue emptied; button hid itself; `last_sync` untouched. Read-only DB check: both
+rows have full drag-import parity, linked into `Dub` at their Spotify positions
+(TrackNo 74, 178); WAL 0 bytes; both marked synced in state.
+
+### 17.5 Not verified yet
+The refactored **full** sync (`_do_sync` now delegating to `_process_track`) has
+not had a full run — only its shared pieces were exercised via retry. The wiring
+change is mechanical, but the next normal Sync is its first real run; watch it.
+
+### 17.6 Still open (pre-existing, unchanged)
+`_do_sync` only flushes WAL once at the very end, so an interrupted full sync
+leaves imports invisible until a manual flush (see the 2026-09 watchdog kill).
+Retry flushes in `finally`; full sync still doesn't.

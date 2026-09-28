@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 # Duration tolerance for YouTube matching (seconds)
 DURATION_TOLERANCE_SECS = 30
 
+# Cap on candidate videos tried per track, across all search queries
+MAX_DOWNLOAD_ATTEMPTS = 5
+
 # Make ffmpeg discoverable to yt-dlp's child processes via PATH
 if FFMPEG_DIR and FFMPEG_DIR not in os.environ.get("PATH", ""):
     os.environ["PATH"] = FFMPEG_DIR + os.pathsep + os.environ.get("PATH", "")
@@ -48,32 +51,40 @@ def download_track(track: TrackInfo, output_dir: str) -> Path | None:
     seen = set()
     queries = [q for q in queries if not (q in seen or seen.add(q))]
 
-    video_url = None
+    # Try each query's candidates in ranked order. A candidate can be
+    # unavailable (removed / region-blocked) even though search listed it —
+    # extract_flat search doesn't check availability — so on failure fall
+    # through to the next candidate instead of giving up on the track.
+    tried: set[str] = set()
     for query in queries:
         logger.info("Searching YouTube for: %s", query)
-        video_url = _search_youtube(query, track.duration_ms)
-        if video_url:
-            break
+        for video_url in _search_youtube(query, track.duration_ms):
+            if video_url in tried:
+                continue
+            if len(tried) >= MAX_DOWNLOAD_ATTEMPTS:
+                break
+            tried.add(video_url)
 
-    if not video_url:
+            logger.info("Found YouTube match: %s", video_url)
+            file_path = _download_audio(video_url, track, output_path)
+            if file_path:
+                _tag_file(file_path, track)
+                return file_path
+            logger.warning("Candidate failed, trying next: %s", video_url)
+
+    if tried:
+        logger.error("All %d YouTube candidates failed for: %s - %s", len(tried), track.artist, track.title)
+    else:
         logger.error("No YouTube match found for: %s - %s (tried %d queries)", track.artist, track.title, len(queries))
-        return None
-
-    logger.info("Found YouTube match: %s", video_url)
-
-    # Download audio
-    file_path = _download_audio(video_url, track, output_path)
-    if not file_path:
-        return None
-
-    # Tag with ID3 metadata
-    _tag_file(file_path, track)
-
-    return file_path
+    return None
 
 
-def _search_youtube(query: str, expected_duration_ms: int) -> str | None:
-    """Search YouTube and find the best duration-matched result."""
+def _search_youtube(query: str, expected_duration_ms: int) -> list[str]:
+    """Search YouTube and return candidate URLs, best duration match first.
+
+    Results within DURATION_TOLERANCE_SECS come first, closest first. If none
+    are within tolerance, the single closest result is returned anyway.
+    """
     expected_secs = expected_duration_ms / 1000
 
     # Use extract_flat=True to avoid errors from unavailable videos in search results
@@ -90,42 +101,44 @@ def _search_youtube(query: str, expected_duration_ms: int) -> str | None:
             results = ydl.extract_info(f"ytsearch5:{query}", download=False)
     except Exception as e:
         logger.error("YouTube search failed: %s", e)
-        return None
+        return []
 
     if not results or "entries" not in results:
-        return None
+        return []
 
-    best_match = None
-    best_diff = float("inf")
-
+    scored = []
     for entry in results["entries"]:
-        if not entry:
+        if not entry or entry.get("duration") is None:
             continue
-        duration = entry.get("duration")
-        if duration is None:
-            continue
+        url = entry.get("webpage_url") or entry.get("url")
+        if url:
+            scored.append((abs(entry["duration"] - expected_secs), url))
+    scored.sort(key=lambda x: x[0])
 
-        diff = abs(duration - expected_secs)
-        if diff < best_diff:
-            best_diff = diff
-            best_match = entry
+    in_tolerance = [url for diff, url in scored if diff <= DURATION_TOLERANCE_SECS]
+    if in_tolerance:
+        return in_tolerance
 
-    if best_match and best_diff <= DURATION_TOLERANCE_SECS:
-        return best_match.get("webpage_url") or best_match.get("url")
-
-    if best_match:
+    if scored:
         logger.warning(
             "Best YouTube match has %.0fs duration difference (tolerance: %ds) — downloading anyway",
-            best_diff, DURATION_TOLERANCE_SECS,
+            scored[0][0], DURATION_TOLERANCE_SECS,
         )
-        return best_match.get("webpage_url") or best_match.get("url")
+        return [scored[0][1]]
 
-    return None
+    return []
 
 
 def _download_audio(url: str, track: TrackInfo, output_dir: Path) -> Path | None:
     """Download audio from YouTube URL, convert to MP3 320kbps."""
     output_template = str(output_dir / track.safe_filename) + ".%(ext)s"
+
+    # A previous candidate that failed mid-download leaves a .part file under
+    # the same name; yt-dlp would resume it with THIS video's data and splice
+    # two different uploads together. Start every attempt clean.
+    for leftover in output_dir.iterdir():
+        if leftover.name.startswith(f"{track.safe_filename}."):
+            leftover.unlink(missing_ok=True)
 
     # Ensure ffmpeg is on PATH (WinGet install location)
     _ensure_ffmpeg_path()

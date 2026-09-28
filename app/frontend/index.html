@@ -53,6 +53,11 @@
             background: #333;
             color: #999;
         }
+        .retry-btn {
+            margin-top: 8px;
+            background: #b3541e;
+        }
+        .retry-btn:hover { background: #cc6226; }
 
 
         /* Status Card */
@@ -285,6 +290,7 @@
         <p class="subtitle">Spotify &rarr; Rekordbox</p>
 
         <button class="sync-btn" id="syncBtn" onclick="startSync()">Sync</button>
+        <button class="sync-btn retry-btn" id="retryBtn" onclick="startRetry()" style="display:none">Retry failed</button>
 
         <div class="card" id="statusCard" style="display:none">
             <div class="card-title">Status</div>
@@ -361,26 +367,66 @@
     <script>
         let pollInterval = null;
 
-        async function startSync() {
-            const btn = document.getElementById('syncBtn');
-            btn.disabled = true;
-            btn.classList.add('running');
-            btn.textContent = 'Syncing...';
+        function setButtonsBusy(activeBtnId, busyLabel) {
+            const syncBtn = document.getElementById('syncBtn');
+            const retryBtn = document.getElementById('retryBtn');
+            syncBtn.disabled = true;
+            retryBtn.disabled = true;
+            const active = document.getElementById(activeBtnId);
+            active.classList.add('running');
+            active.textContent = busyLabel;
+        }
 
+        function resetButtons() {
+            const syncBtn = document.getElementById('syncBtn');
+            const retryBtn = document.getElementById('retryBtn');
+            syncBtn.disabled = false;
+            retryBtn.disabled = false;
+            syncBtn.classList.remove('running');
+            retryBtn.classList.remove('running');
+            syncBtn.textContent = 'Sync';
+        }
+
+        // Show "Retry failed (N)" only while there are queued failures.
+        // Tooltip lists them; set via .title (not innerHTML) so track names
+        // can't inject markup.
+        function updateRetryButton(data) {
+            const retryBtn = document.getElementById('retryBtn');
+            if (retryBtn.classList.contains('running')) return;
+            const pending = data.failed_pending || [];
+            if (pending.length === 0 || data.status === 'running') {
+                retryBtn.style.display = 'none';
+                return;
+            }
+            retryBtn.style.display = 'block';
+            retryBtn.textContent = `Retry failed (${pending.length})`;
+            retryBtn.title = pending
+                .map(f => `${f.artist} - ${f.title}  [${f.playlist}]`)
+                .join('\n');
+        }
+
+        async function startJob(endpoint, activeBtnId, busyLabel) {
+            setButtonsBusy(activeBtnId, busyLabel);
             document.getElementById('statusCard').style.display = 'block';
             document.getElementById('statusCard').classList.add('running');
 
             try {
-                await fetch('/api/sync', { method: 'POST' });
+                await fetch(endpoint, { method: 'POST' });
                 // Poll for status
                 if (pollInterval) clearInterval(pollInterval);
                 pollInterval = setInterval(pollStatus, 1000);
             } catch (e) {
-                btn.disabled = false;
-                btn.classList.remove('running');
-                btn.textContent = 'Sync';
+                resetButtons();
                 document.getElementById('statusMessage').textContent = 'Error: ' + e.message;
             }
+        }
+
+        function startSync() {
+            startJob('/api/sync', 'syncBtn', 'Syncing...');
+        }
+
+        function startRetry() {
+            startJob('/api/retry-failed', 'retryBtn', 'Retrying...');
         }
 
         async function pollStatus() {
@@ -393,10 +439,8 @@
                     clearInterval(pollInterval);
                     pollInterval = null;
 
-                    const btn = document.getElementById('syncBtn');
-                    btn.disabled = false;
-                    btn.classList.remove('running');
-                    btn.textContent = 'Sync';
+                    resetButtons();
+                    updateRetryButton(data);
                     document.getElementById('statusCard').classList.remove('running');
                 }
             } catch (e) {
@@ -405,6 +449,7 @@
         }
 
         function updateUI(data) {
+            updateRetryButton(data);
             document.getElementById('statusCard').style.display = 'block';
             document.getElementById('statusMessage').textContent = data.message || data.status;
             document.getElementById('statusPhase').textContent = data.phase || '';
@@ -685,11 +730,9 @@
                 if (data.last_sync) {
                     updateUI(data);
                 }
+                updateRetryButton(data);
                 if (data.status === 'running') {
-                    const btn = document.getElementById('syncBtn');
-                    btn.disabled = true;
-                    btn.classList.add('running');
-                    btn.textContent = 'Syncing...';
+                    setButtonsBusy('syncBtn', 'Syncing...');
                     pollInterval = setInterval(pollStatus, 1000);
                 }
             } catch (e) {
