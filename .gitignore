@@ -12,3 +12,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# AI-session handoff notes (local continuity only, not project docs)
+HANDOFF_*.md
