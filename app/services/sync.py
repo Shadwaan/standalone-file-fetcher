@@ -654,9 +654,35 @@ class SyncOrchestrator:
                 )
                 flac_state["display_name"] = display_name
 
+                rb_playlist_id = rb.find_or_create_playlist(display_name)
+                if not flac_state.get("rb_playlist_id"):
+                    flac_state["rb_playlist_id"] = rb_playlist_id
+                    flac_state["created_at"] = datetime.now().isoformat()
+
+                # Two independent checks for "already done", not just one: our own
+                # state file AND Rekordbox's actual database. State can be lost,
+                # never written (e.g. a track added outside the normal Sync flow),
+                # or otherwise go stale -- without this second check, that gets
+                # every one of its tracks silently re-downloaded and duplicated.
                 known_ids = set(flac_state["tracks"].keys())
+                rb_existing_titles = rb.get_playlist_track_titles(rb_playlist_id)
                 current_ids = {t.spotify_id for t in spotify_tracks}
-                new_tracks = [t for t in spotify_tracks if t.spotify_id not in known_ids]
+                new_tracks = [
+                    t for t in spotify_tracks
+                    if t.spotify_id not in known_ids and t.title not in rb_existing_titles
+                ]
+                # A track Rekordbox already has but our state didn't know about --
+                # backfill the state instead of silently doing nothing, so future
+                # runs (and the UI's FLAC-playlist badge) see it correctly too.
+                for t in spotify_tracks:
+                    if t.spotify_id in known_ids or t.title not in rb_existing_titles:
+                        continue
+                    found = rb.find_content_by_title(t.artist, t.title)
+                    file_path = found[1] if found else ""
+                    flac_state["tracks"][t.spotify_id] = {
+                        "filename": Path(file_path).name if file_path else t.filename,
+                        "file_path": file_path, "artist": t.artist, "title": t.title,
+                    }
                 removed_ids = known_ids - current_ids
 
                 self.progress.playlist_details.append({
@@ -664,11 +690,6 @@ class SyncOrchestrator:
                     "total": len(spotify_tracks), "new": len(new_tracks), "removed": len(removed_ids),
                 })
                 self.progress.tracks_total += len(new_tracks)
-
-                rb_playlist_id = rb.find_or_create_playlist(display_name)
-                if not flac_state.get("rb_playlist_id"):
-                    flac_state["rb_playlist_id"] = rb_playlist_id
-                    flac_state["created_at"] = datetime.now().isoformat()
 
                 if new_tracks:
                     def _progress_cb(msg):
