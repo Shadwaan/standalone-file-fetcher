@@ -347,6 +347,45 @@ def ensure_16bit_flac(path: Path, originals_dir: Path) -> Path:
     return new_path
 
 
+# ─── Authenticity check: catch lossy-source transcodes wrapped in FLAC ──────
+# A file that's really an MP3 decoded and re-encoded as FLAC is technically
+# lossless FROM THAT POINT ON, but the original lossy encoder already threw
+# away everything above its cutoff frequency (~16-20.5kHz depending on
+# bitrate) -- that shows up as a hard, unnaturally clean wall of silence
+# there. A genuine CD-sourced FLAC has real (if quiet) content out toward the
+# ~22kHz Nyquist limit. This is a heuristic, not proof -- some real masters
+# (certain vinyl rips, heavily limited masters) roll off early too -- so a
+# flagged file is kept, just surfaced as "suspect" rather than silently trusted.
+
+HIGH_FREQ_CUTOFF_HZ = 20000
+HIGH_FREQ_SILENCE_THRESHOLD_DB = -75.0
+
+
+def check_authenticity(path: Path) -> dict:
+    """Returns {"suspect": bool, "max_db": float | None, "reason": str}."""
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-i", str(path), "-af", f"highpass=f={HIGH_FREQ_CUTOFF_HZ},volumedetect",
+             "-vn", "-sn", "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"suspect": False, "max_db": None, "reason": f"authenticity check failed to run: {e}"}
+
+    m = re.search(r"max_volume:\s*(-?\d+\.?\d*)\s*dB", out.stderr)
+    if not m:
+        return {"suspect": False, "max_db": None, "reason": "could not measure high-frequency content"}
+
+    max_db = float(m.group(1))
+    if max_db < HIGH_FREQ_SILENCE_THRESHOLD_DB:
+        return {
+            "suspect": True, "max_db": max_db,
+            "reason": f"near-total silence above {HIGH_FREQ_CUTOFF_HZ / 1000:.0f}kHz (max {max_db}dB) -- "
+                      f"consistent with a lossy source transcoded into FLAC, not genuinely lossless",
+        }
+    return {"suspect": False, "max_db": max_db, "reason": "has real high-frequency content"}
+
+
 # ─── Batch search-then-watch pipeline ───────────────────────────────────────
 # Per-track state used while resolving a whole playlist's worth of new tracks.
 

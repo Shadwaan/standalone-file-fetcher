@@ -728,6 +728,12 @@ class SyncOrchestrator:
                         dest = soulseek.ensure_16bit_flac(dest, originals_dir)
                         self.progress.tracks_downloaded += 1
 
+                        auth = soulseek.check_authenticity(dest)
+                        if auth["suspect"]:
+                            msg = f"Suspect FLAC (likely transcoded from lossy source): {track.artist} - {track.title} -- {auth['reason']}"
+                            logger.warning(msg)
+                            self.progress.errors.append(msg)
+
                         file_path = str(dest).replace("\\", "/")
                         rb_result = rb.import_track_unanalyzed(file_path, track)
                         content_id = rb_result.get("id")
