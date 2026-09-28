@@ -54,6 +54,17 @@ if not exist .venv\Scripts\python.exe (
     echo.
 )
 
+REM --- 2b. Keep yt-dlp current -------------------------------------------------
+REM The venv bootstrap above only runs pip when it CREATES .venv, so yt-dlp would
+REM otherwise stay frozen at whatever shipped on first run. YouTube breaks stale
+REM extractors within weeks (see DEBUG_LOG section 16), so re-check every launch.
+REM Nightly (--pre) because YouTube fixes land there first. `yt-dlp -U` cannot be
+REM used: it only self-updates the standalone binary, not a pip install.
+REM Scoped to yt-dlp ONLY -- pyrekordbox must not silently move.
+echo Checking for yt-dlp updates...
+.venv\Scripts\python.exe -m pip install -U --pre -q --disable-pip-version-check --timeout 10 --retries 1 "yt-dlp[default]" || echo   (skipped - offline or PyPI unreachable; using installed version)
+echo.
+
 REM --- 3. Run the server ------------------------------------------------------
 echo Server log appears below. Close the browser tab to stop the server
 echo ^(or press Ctrl+C^). This window closes automatically when the server exits.

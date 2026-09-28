@@ -512,3 +512,121 @@ Also: `PLAYLIST UUID=""` — now set to a real `uuid4().hex` like Traktor's own.
 **Fix:** insert into (or create) the `SUBNODES` element and set `COUNT` from the actual child count after insert. Verified structure round-trips a Traktor open/close with playlists intact.
 
 **How this was missed:** our own verification parsed the XML with `root.iter('NODE')`, which happily finds nodes anywhere in the tree — the file "looked correct" while being invalid for Traktor. When verifying NML playlist structure, always check placement (`PLAYLISTS → NODE $ROOT → SUBNODES → NODE`) and `COUNT`/`ENTRIES` attribute consistency, not just node existence.
+
+## 16. Stale yt-dlp caused widespread download 403s — FIXED 2026-08-31
+
+**(Numbered 16, not 15: section 15 was taken earlier the same day by the Traktor SUBNODES fix.)**
+
+### 16.1 The structural bug: yt-dlp froze after first run
+Both launchers install dependencies ONLY when they create the venv:
+
+- `start.command:79` — `if [ ! -x ".venv/bin/python" ]; then` … `pip install -r requirements.txt` … `fi`
+- `start.bat` — `if not exist .venv\Scripts\python.exe (` … `pip install -r requirements.txt` … `)`
+
+Every later launch skips pip entirely. Combined with `requirements.txt` pinning
+`yt-dlp>=2024.1.0` (a floor, not a version), yt-dlp stayed at whatever shipped on
+first run — forever. YouTube breaks stale extractors within weeks, so this is a
+guaranteed time-bomb, not a maybe.
+
+### 16.2 Symptom and misdiagnosis
+Observed during the 2026-08-31 first full sync: 183/183 tracks downloaded but
+16 failed with `HTTP Error 403: Forbidden`. A retry recovered 15 of 16. That
+intermittency led to an initial (WRONG) diagnosis of transient IP rate limiting,
+with advice to "wait 10–15 minutes and re-sync".
+
+**That was wrong.** The real cause was a stale extractor; the intermittency came
+from the degraded fallback client succeeding *sometimes*. Do not trust
+"retry fixed most of them" as evidence of rate limiting.
+
+### 16.3 Root cause, established by controlled repro
+Installed version was **2026.7.4**. Running one known-failing track through the
+real `services.downloader` code path with `verbose: True` showed the mechanism:
+
+```
+WARNING: [youtube] No supported JavaScript runtime could be found. Only deno is
+enabled by default ... YouTube extraction without a JS runtime has been deprecated
+[youtube] EBtBSdZk0xM: Downloading android vr player API JSON
+[info] EBtBSdZk0xM: Downloading 1 format(s): 251
+ERROR: unable to download video data: HTTP Error 403: Forbidden
+```
+
+yt-dlp could not use the standard web clients, fell back to `ANDROID_VR`
+(visible as `c=ANDROID_VR` in the googlevideo URL), and *that* client's format
+URL was rejected with 403.
+
+Probing further on 2026.7.4:
+
+| Attempt | Result |
+|---|---|
+| default (android_vr) | formats returned, download **403** |
+| `js_runtimes={'node':{}}` (node v24 present) | warning gone, still android_vr, still **403** |
+| `player_client=tv` | `The page needs to be reloaded.` |
+| `player_client=web` / `web_safari` / `ios` / `mweb` | `Requested format is not available` — i.e. **zero formats returned** (PO-token gated) |
+
+**Decisive control test:** a video that had downloaded successfully at 16:33 the
+same day *also* 403'd when retried later. The failure was therefore systemic and
+time-dependent, NOT per-video and NOT per-IP-quota.
+
+### 16.4 The fix
+Upgrading to nightly **2026.8.30.232658.dev0** fixed it outright — both the
+control video and the track that had failed 3× in a row downloaded on the first
+attempt, with no other changes to `ydl_opts`. Classification: **(a) stale
+extractor / signature failure.**
+
+Launchers now re-check yt-dlp on EVERY launch, before `main.py` is invoked:
+
+```
+.venv/bin/python -m pip install -U --pre -q \
+    --disable-pip-version-check --timeout 10 --retries 1 "yt-dlp[default]" \
+  || echo "  (skipped — offline or PyPI unreachable; using installed version)"
+```
+
+Design constraints, all load-bearing:
+- **Must run in the launcher, not `main.py`.** Upgrading after Python has already
+  imported `yt_dlp` means the current run still executes the old code.
+- **`yt-dlp -U` does not work here.** The self-updater only handles the standalone
+  binary; a pip install can only be updated by pip.
+- **`--pre` (nightly)** because YouTube extractor fixes land in nightly first —
+  that is the entire point of the check.
+- **Never block launch.** `--timeout 10 --retries 1` caps the offline penalty;
+  `||` degrades failure to a warning.
+- **Scoped to yt-dlp only.** Deliberately NOT `pip install -U -r requirements.txt`
+  — pyrekordbox must not move silently (see 16.6).
+
+`requirements.txt` floor raised `yt-dlp>=2024.1.0` → `>=2026.8.19` so fresh
+installs don't start stale.
+
+Measured: **~1.4 s** when already current; **~1.2–5.4 s** and exit 0 when the
+index is unreachable (both connection-refused and DNS-failure cases tested).
+Note pip returns 0 offline when the requirement is already satisfied, so the
+`||` branch rarely prints — it remains as insurance for hard pip failures.
+
+### 16.5 Open observations (not fixed, deliberately)
+- **No JS runtime installed.** node v24 is present but yt-dlp only enables deno by
+  default. Enabling node (`js_runtimes`) removed the deprecation warning but did
+  NOT fix the 403 on the old version, and is unnecessary on current nightly.
+  Installing deno remains the more future-proof option if web-client extraction
+  becomes mandatory.
+- **`ydl_opts` has no hardening at all today**: no `cookiesfrombrowser`, no
+  `extractor_args`/`player_client`, no custom UA, no `retries`, no
+  `sleep_interval`/`max_sleep_interval`, no PO-token provider. The 5-query search
+  fan-out is unpaced. Current yt-dlp made these unnecessary for now; revisit only
+  if failures recur on an up-to-date version.
+- **Windows launcher window does not auto-close.** The watchdog raises SIGINT,
+  which exits Python with code **2** on Windows; `start.bat` only treats
+  `0`, `-1073741510`, `3221225786` as clean, so it prints "Server exited with
+  error 2. Press any key to close." The server itself exits correctly and frees
+  the port — this is cosmetic only. Fixing it by blanket-treating 2 as clean would
+  mask genuine errors; the better fix is an explicit `sys.exit(0)` on the
+  watchdog path in `main.py`.
+- Running `start.bat` from a Git Bash shell prints `timeout: invalid time
+  interval '/t'` because GNU `timeout` shadows Windows' `timeout.exe`. Test
+  artifact only; harmless (the browser just opens immediately).
+
+### 16.6 What NOT to auto-upgrade
+`pyrekordbox` is the verified-working dependency against the Rekordbox 6/7 schema
+and all the hard-won import hygiene in CLAUDE.md (UUID, ArtistID/AlbumID,
+drag-import parity fields). Auto-upgrading it on launch would silently change DB
+write behaviour with no test coverage — precisely how a future DEBUG_LOG section
+gets written. Note `requirements.txt` currently declares `pyrekordbox>=0.3.0`,
+a floor, even though 0.4.4 is the verified version; consider pinning it exactly.
