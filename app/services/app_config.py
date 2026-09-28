@@ -26,6 +26,7 @@ _DEFAULTS = {
     "music_folder": None,        # null = unconfigured; UI shows first-run prompt
     "first_run_complete": False,
     "sync_to_traktor": False,    # also write to Traktor's collection.nml on each sync
+    "download_source": "youtube",  # "youtube" (yt-dlp, MP3) or "soulseek" (Nicotine+, FLAC)
 }
 
 
@@ -111,4 +112,21 @@ def set_sync_to_traktor(enabled: bool) -> dict:
     cfg["sync_to_traktor"] = bool(enabled)
     save(cfg)
     logger.info("sync_to_traktor set to %s", cfg["sync_to_traktor"])
+    return cfg
+
+
+def get_download_source() -> str:
+    """'youtube' (yt-dlp, MP3) or 'soulseek' (Nicotine+, FLAC)."""
+    cfg = load()
+    return cfg.get("download_source", "youtube")
+
+
+def set_download_source(source: str) -> dict:
+    """Set the download source. Returns the updated config dict."""
+    if source not in ("youtube", "soulseek"):
+        raise ValueError(f"download_source must be 'youtube' or 'soulseek', got: {source}")
+    cfg = load()
+    cfg["download_source"] = source
+    save(cfg)
+    logger.info("download_source set to %s", source)
     return cfg

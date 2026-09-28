@@ -557,7 +557,24 @@
                         <span class="config-label">ffmpeg</span>
                         <span class="config-value">${cfg.ffmpeg_available ? cfg.ffmpeg_path : 'Not found — install via brew (Mac) or winget (Windows)'}</span>
                     </div>
+                    <div class="config-row">
+                        <span class="config-label">Download source</span>
+                        <span class="config-value" style="display:flex;align-items:center;gap:8px">
+                            <select id="downloadSourceSelect" onchange="setDownloadSource(this.value)"
+                                    style="background:#282828;color:#fff;border:1px solid #444;border-radius:4px;padding:4px 8px;cursor:pointer">
+                                <option value="youtube" ${cfg.download_source === 'youtube' ? 'selected' : ''}>YouTube (MP3, 320kbps)</option>
+                                <option value="soulseek" ${cfg.download_source === 'soulseek' ? 'selected' : ''}>Soulseek (FLAC, via Nicotine+)</option>
+                            </select>
+                        </span>
+                    </div>
+                    <div class="config-row" id="soulseekStatusRow" style="display:${cfg.download_source === 'soulseek' ? 'flex' : 'none'}">
+                        <span class="config-label">Nicotine+</span>
+                        <span class="config-value" id="soulseekStatusValue">Checking…</span>
+                    </div>
                 `;
+                if (cfg.download_source === 'soulseek') {
+                    checkSoulseekStatus();
+                }
                 if (!cfg.first_run_complete) {
                     openFolderModal(true);
                 }
@@ -656,6 +673,57 @@
             }
         }
 
+        async function setDownloadSource(source) {
+            try {
+                await fetch('/api/config/download-source', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source }),
+                });
+                document.getElementById('soulseekStatusRow').style.display = source === 'soulseek' ? 'flex' : 'none';
+                if (source === 'soulseek') checkSoulseekStatus();
+            } catch (e) {
+                alert('Failed to set download source: ' + e.message);
+            }
+        }
+
+        async function checkSoulseekStatus() {
+            const el = document.getElementById('soulseekStatusValue');
+            if (!el) return;
+            el.textContent = 'Checking…';
+            el.style.color = '#777';
+            try {
+                const res = await fetch('/api/soulseek/status');
+                const s = await res.json();
+                if (s.running && s.api_reachable) {
+                    el.textContent = 'Running — ready for FLAC downloads';
+                    el.style.color = '#1db954';
+                } else if (s.running && !s.api_reachable) {
+                    el.innerHTML = `⚠️ Running, but its API plugin isn't reachable — enable "API Nicotine Plus" in Preferences → Plugins`;
+                    el.style.color = '#e5a00d';
+                } else {
+                    el.innerHTML = `Not running — will be started automatically when you hit Sync <button class="link-btn" onclick="startNicotine()">Start now</button>`;
+                    el.style.color = '#e5a00d';
+                }
+            } catch (e) {
+                el.textContent = 'Could not check status';
+                el.style.color = '#e5a00d';
+            }
+        }
+
+        async function startNicotine() {
+            const el = document.getElementById('soulseekStatusValue');
+            if (el) { el.textContent = 'Starting Nicotine+…'; el.style.color = '#777'; }
+            try {
+                const res = await fetch('/api/soulseek/launch', { method: 'POST' });
+                const result = await res.json();
+                if (result.error) alert(result.error);
+            } catch (e) {
+                alert('Failed to start Nicotine+: ' + e.message);
+            }
+            checkSoulseekStatus();
+        }
+
         async function saveMusicFolder() {
             const errEl = document.getElementById('folderModalError');
             errEl.textContent = '';
@@ -699,6 +767,9 @@
                         <span class="playlist-name">${pl.display_name}</span>
                         <span class="playlist-meta">
                             ${pl.track_count} tracks
+                            ${pl.has_flac_variant
+                                ? `<span class="badge" style="background:#1db954;color:#000">FLAC: ${pl.flac_track_count} tracks</span>`
+                                : `<span class="badge" style="background:#333;color:#888">No FLAC playlist yet</span>`}
                             <button class="stop-btn" onclick="stopSyncing('${pl.id}', '${(pl.display_name || '').replace(/'/g, "\\'")}')">✕ Stop syncing</button>
                         </span>
                     </li>

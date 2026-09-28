@@ -124,3 +124,42 @@ def is_rekordbox_running() -> bool:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return False
+
+
+NICOTINE_PROCESS_NAMES = {"nicotine+.exe", "nicotine+-debug.exe", "nicotine+", "nicotine"}
+NICOTINE_API_BASE_URL = os.getenv("NICOTINE_API_BASE_URL", "http://127.0.0.1:12339")
+
+
+def _default_nicotine_exe() -> str | None:
+    """Best-guess Nicotine+ executable path. User can override via NICOTINE_EXE_PATH."""
+    override = os.getenv("NICOTINE_EXE_PATH")
+    if override and os.path.exists(override):
+        return override
+    if IS_WINDOWS:
+        candidates = [
+            r"D:\Program Files\Nicotine+\Nicotine+.exe",
+            r"C:\Program Files\Nicotine+\Nicotine+.exe",
+            r"C:\Program Files (x86)\Nicotine+\Nicotine+.exe",
+        ]
+        candidates += glob.glob(str(Path.home() / "AppData" / "Local" / "Programs" / "Nicotine+" / "Nicotine+.exe"))
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+    found = shutil.which("nicotine+") or shutil.which("nicotine")
+    return found
+
+
+DEFAULT_NICOTINE_EXE = _default_nicotine_exe()
+
+
+def is_nicotine_running() -> bool:
+    """True if any Nicotine+ process is currently running (cross-platform)."""
+    import psutil
+    for proc in psutil.process_iter(["name"]):
+        try:
+            name = (proc.info.get("name") or "").lower()
+            if name in NICOTINE_PROCESS_NAMES:
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return False

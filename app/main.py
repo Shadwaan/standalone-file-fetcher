@@ -136,6 +136,7 @@ async def get_config():
         "ffmpeg_available": platform_paths.FFMPEG_PATH is not None,
         "ffmpeg_path": platform_paths.FFMPEG_PATH,
         "spotify_signed_in": SPOTIFY_CACHE_FILE.exists(),
+        "download_source": app_config.get_download_source(),
     }
 
 
@@ -165,6 +166,10 @@ class TraktorToggleUpdate(BaseModel):
     enabled: bool
 
 
+class DownloadSourceUpdate(BaseModel):
+    source: str  # "youtube" or "soulseek"
+
+
 @app.post("/api/config/traktor")
 async def set_traktor(payload: TraktorToggleUpdate):
     """Enable/disable Traktor sync. When enabled, each sync also writes to collection.nml."""
@@ -182,6 +187,33 @@ async def set_music_folder(payload: MusicFolderUpdate):
         return {"status": "ok", "music_folder": cfg["music_folder"]}
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/config/download-source")
+async def set_download_source(payload: DownloadSourceUpdate):
+    """Choose whether the next Sync downloads via yt-dlp (MP3) or Soulseek (FLAC)."""
+    from services import app_config
+    try:
+        cfg = app_config.set_download_source(payload.source)
+        return {"status": "ok", "download_source": cfg["download_source"]}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/soulseek/status")
+async def soulseek_status():
+    """Is Nicotine+ running, and is its API plugin reachable?"""
+    from services import soulseek
+    return soulseek.get_status()
+
+
+@app.post("/api/soulseek/launch")
+async def soulseek_launch():
+    """Attempt to start Nicotine+ and wait for its API to come up."""
+    from services import soulseek
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, soulseek.launch)
+    return result
 
 
 _PICK_FOLDER_SCRIPT = r"""
@@ -249,11 +281,16 @@ async def get_tracked_playlists():
     orchestrator = _get_orchestrator()
     tracked = []
     for pid, pdata in orchestrator._state.get("playlists", {}).items():
+        flac = pdata.get("flac_variant")
         tracked.append({
             "id": pid,
             "name": pdata.get("name", pid),
             "display_name": pdata.get("display_name", pdata.get("name", pid)),
             "track_count": len(pdata.get("tracks", {})),
+            "has_flac_variant": bool(flac and flac.get("rb_playlist_id")),
+            "flac_display_name": (flac or {}).get("display_name"),
+            "flac_track_count": len((flac or {}).get("tracks", {})),
+            "flac_rb_playlist_id": (flac or {}).get("rb_playlist_id"),
         })
     return {"playlists": tracked}
 

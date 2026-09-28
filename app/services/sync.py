@@ -440,6 +440,9 @@ class SyncOrchestrator:
 
     def _do_sync(self) -> dict:
         """Execute the full sync pipeline."""
+        if app_config.get_download_source() == "soulseek":
+            return self._do_sync_soulseek()
+
         if self._refuse_if_rekordbox_running():
             return self.get_progress()
 
@@ -575,4 +578,173 @@ class SyncOrchestrator:
                 pass
 
         self._save_state()
+        return self.get_progress()
+
+    # ─── Soulseek / FLAC pipeline ───────────────────────────────────────────
+    # Distinct from the yt-dlp path above: Soulseek downloads are inherently
+    # unpredictable in timing (peer-dependent), so instead of a per-track
+    # blocking download call, this searches+queues every new track up front,
+    # then polls (self-healing stalled/dead sources) until everything is
+    # resolved, and ONLY THEN does a single batch Rekordbox import. Touching
+    # Rekordbox exactly once per run -- never mid-resolve -- is what keeps
+    # playlist ordering from ever going stale/colliding between runs.
+
+    def _do_sync_soulseek(self) -> dict:
+        if self._refuse_if_rekordbox_running():
+            return self.get_progress()
+
+        from services import soulseek
+        from services.spotify import SpotifyService
+        from services import rekordbox as rb
+
+        status = soulseek.get_status()
+        if not status["running"]:
+            self.progress.phase = "starting_nicotine"
+            self.progress.message = "Nicotine+ isn't running -- starting it..."
+            launch_result = soulseek.launch()
+            if not launch_result["api_reachable"]:
+                self.progress.status = "error"
+                self.progress.message = launch_result["error"] or (
+                    "Nicotine+ needs to be running for Soulseek downloads. "
+                    "Please start it and enable the 'API Nicotine Plus' plugin."
+                )
+                self.progress.errors.append(self.progress.message)
+                return self.get_progress()
+        elif not status["api_reachable"]:
+            self.progress.status = "error"
+            self.progress.message = (
+                "Nicotine+ is running but its API plugin isn't reachable. "
+                "Enable 'API Nicotine Plus' in Preferences -> Plugins."
+            )
+            self.progress.errors.append(self.progress.message)
+            return self.get_progress()
+
+        music_folder = app_config.get_music_folder()
+        nicotine_download_dir = os.getenv("NICOTINE_DOWNLOAD_DIR", r"D:\Music\Nicotine")
+
+        self.progress.phase = "discovering"
+        self.progress.message = "Connecting to Spotify..."
+        logger.info("=== Soulseek/FLAC sync started ===")
+
+        spotify = SpotifyService()
+        playlists = spotify.get_prefixed_playlists()
+        self.progress.playlists_found = len(playlists)
+
+        try:
+            for pl in playlists:
+                pl_id = pl["id"]
+                pl_name = pl["name"]
+                base_display_name = pl["display_name"]
+                display_name = f"{base_display_name} FLAC"
+
+                self.progress.phase = "syncing"
+                self.progress.message = f"Processing playlist: {pl_name} (FLAC)"
+                logger.info("Processing playlist: %s -> '%s'", pl_name, display_name)
+
+                spotify_tracks = spotify.get_playlist_tracks(pl_id, pl_name)
+                for t in spotify_tracks:
+                    t.file_extension = "flac"
+                    t.playlist_name = display_name
+
+                pl_state = self._state["playlists"].setdefault(
+                    pl_id, {"tracks": {}, "snapshot_id": "", "name": pl_name, "display_name": base_display_name},
+                )
+                flac_state = pl_state.setdefault(
+                    "flac_variant", {"tracks": {}, "rb_playlist_id": None, "display_name": display_name, "created_at": None},
+                )
+                flac_state["display_name"] = display_name
+
+                known_ids = set(flac_state["tracks"].keys())
+                current_ids = {t.spotify_id for t in spotify_tracks}
+                new_tracks = [t for t in spotify_tracks if t.spotify_id not in known_ids]
+                removed_ids = known_ids - current_ids
+
+                self.progress.playlist_details.append({
+                    "name": pl_name, "display_name": display_name,
+                    "total": len(spotify_tracks), "new": len(new_tracks), "removed": len(removed_ids),
+                })
+                self.progress.tracks_total += len(new_tracks)
+
+                rb_playlist_id = rb.find_or_create_playlist(display_name)
+                if not flac_state.get("rb_playlist_id"):
+                    flac_state["rb_playlist_id"] = rb_playlist_id
+                    flac_state["created_at"] = datetime.now().isoformat()
+
+                if new_tracks:
+                    def _progress_cb(msg):
+                        self.progress.message = msg
+
+                    self.progress.phase = "searching"
+                    states = soulseek.search_and_queue_all(new_tracks, on_progress=_progress_cb)
+
+                    self.progress.phase = "downloading"
+                    soulseek.resolve_all(states, on_progress=_progress_cb)
+
+                    self.progress.phase = "importing"
+                    playlist_folder = Path(music_folder) / display_name
+                    playlist_folder.mkdir(parents=True, exist_ok=True)
+                    originals_dir = playlist_folder / "_originals"
+
+                    for track in new_tracks:
+                        st = states[track.spotify_id]
+                        if not st.downloaded:
+                            self.progress.tracks_failed += 1
+                            self.progress.errors.append(f"Soulseek: no source found for {track.artist} - {track.title}")
+                            continue
+
+                        src = soulseek.download_path_for(st, nicotine_download_dir)
+                        if not src:
+                            self.progress.tracks_failed += 1
+                            self.progress.errors.append(f"Soulseek: download finished but file not found for {track.artist} - {track.title}")
+                            continue
+
+                        dest = playlist_folder / src.name
+                        counter = 1
+                        while dest.exists() and dest != src:
+                            dest = playlist_folder / f"{src.stem}_{counter}{src.suffix}"
+                            counter += 1
+                        shutil.move(str(src), str(dest))
+                        dest = soulseek.ensure_16bit_flac(dest, originals_dir)
+                        self.progress.tracks_downloaded += 1
+
+                        file_path = str(dest).replace("\\", "/")
+                        rb_result = rb.import_track_unanalyzed(file_path, track)
+                        content_id = rb_result.get("id")
+                        if content_id:
+                            rb.add_track_to_playlist(rb_playlist_id, content_id, track.position + 1)
+                            self.progress.tracks_imported += 1
+                            flac_state["tracks"][track.spotify_id] = {
+                                "filename": dest.name, "file_path": file_path,
+                                "artist": track.artist, "title": track.title,
+                            }
+
+                # Removals — remove from the FLAC playlist only, never delete files
+                for rid in removed_ids:
+                    info = flac_state["tracks"].get(rid, {})
+                    filename = info.get("filename", "")
+                    if filename:
+                        rb.remove_track_from_playlist(display_name, filename)
+                        self.progress.tracks_removed += 1
+                    flac_state["tracks"].pop(rid, None)
+
+                # Reorder every run, from scratch, against true Spotify order --
+                # this is what keeps a late-arriving track from desyncing everything.
+                ordered_titles = [t.title for t in spotify_tracks]
+                rb.reorder_playlist_by_titles(rb_playlist_id, ordered_titles)
+
+                if pl_id not in self._state["playlists"]:
+                    self._state["playlists"][pl_id] = pl_state
+                self._state["playlists"][pl_id]["snapshot_id"] = pl.get("snapshot_id", "")
+
+            rb.flush_wal()
+            self.progress.status = "done"
+            self.progress.phase = "complete"
+            self.progress.message = (
+                f"FLAC sync complete: {self.progress.tracks_imported} imported, "
+                f"{self.progress.tracks_failed} failed, {self.progress.tracks_removed} removed from playlists"
+            )
+            logger.info("=== %s ===", self.progress.message)
+        finally:
+            self._save_state()
+
         return self.get_progress()

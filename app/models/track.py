@@ -15,6 +15,7 @@ class TrackInfo:
     artwork_url: str | None
     playlist_name: str
     position: int = 0
+    file_extension: str = "mp3"  # "mp3" for the yt-dlp path, "flac" for the Soulseek path
 
     @property
     def safe_filename(self) -> str:
@@ -27,7 +28,7 @@ class TrackInfo:
     @property
     def filename(self) -> str:
         """Full filename with extension."""
-        return f"{self.safe_filename}.mp3"
+        return f"{self.safe_filename}.{self.file_extension}"
 
 
 @dataclass

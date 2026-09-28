@@ -828,6 +828,70 @@ def find_content_by_title(artist: str, title: str) -> tuple[str, str] | None:
         return None
 
 
+def get_playlist_track_titles(playlist_id: str) -> set[str]:
+    """Titles of every track currently in a Rekordbox playlist -- the ground
+    truth for "is this track already done", since it reads the durable
+    database directly rather than an ephemeral download-history log that can
+    go stale/get pruned."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        songs = db.session.query(tables.DjmdSongPlaylist).filter_by(PlaylistID=playlist_id).all()
+        titles = set()
+        for s in songs:
+            c = db.session.query(tables.DjmdContent).filter_by(ID=s.ContentID).first()
+            if c and c.Title:
+                titles.add(c.Title)
+        db.session.close()
+        db.engine.dispose()
+        return titles
+    except Exception as e:
+        logger.warning("Failed to read playlist titles for '%s': %s", playlist_id, e)
+        return set()
+
+
+def reorder_playlist_by_titles(playlist_id: str, ordered_titles: list[str]) -> int:
+    """Renumber every track currently in the playlist to match `ordered_titles`
+    (titles not present are skipped, not treated as gaps). Re-derives the
+    FULL ordering from scratch every call -- a track that arrives late (it took
+    longer to download) but belongs earlier in the true order will correctly
+    push everything after it down, instead of leaving a stale TrackNo that
+    collides with whichever track claimed that slot first."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+        from datetime import datetime, timezone
+
+        db = Rekordbox6Database()
+        songs = db.session.query(tables.DjmdSongPlaylist).filter_by(PlaylistID=playlist_id).all()
+        song_by_title = {}
+        for s in songs:
+            c = db.session.query(tables.DjmdContent).filter_by(ID=s.ContentID).first()
+            if c:
+                song_by_title[c.Title] = s
+
+        reordered = 0
+        pos = 1
+        for title in ordered_titles:
+            song = song_by_title.get(title)
+            if not song:
+                continue
+            if song.TrackNo != pos:
+                song.TrackNo = pos
+                song.updated_at = datetime.now(timezone.utc)
+                reordered += 1
+            pos += 1
+        db.session.commit()
+        db.session.close()
+        db.engine.dispose()
+        return reordered
+    except Exception as e:
+        logger.error("Failed to reorder playlist '%s': %s", playlist_id, e)
+        return 0
+
+
 def flush_wal():
     """Checkpoint the WAL file into master.db so Rekordbox can see our changes.
     Runs checkpoint twice to ensure all writes are flushed — pyrekordbox opens
