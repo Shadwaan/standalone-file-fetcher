@@ -173,19 +173,25 @@ _ALT_VERSION_MARKERS = [
 _SAFE_PHRASES = ["original mix", "original version", "album version"]
 
 
-def _clean_tokens(text: str, extra_strip_words=()) -> set[str]:
+def _clean_words(text: str, extra_strip_words=()) -> list[str]:
     text = _PARENS_RE.sub(" ", text)
     text = _FEAT_RE.sub("", text)
     text = _PUNCT_RE.sub(" ", text.lower())
-    words = text.split()
     strip_set = _QUALIFIER_WORDS | _CONNECTOR_WORDS | {w.lower() for w in extra_strip_words}
-    return {w for w in words if w not in strip_set and len(w) > 1 and not w.isdigit()}
+    return [w for w in text.split() if w not in strip_set and len(w) > 1 and not w.isdigit()]
+
+
+def _clean_tokens(text: str, extra_strip_words=()) -> set[str]:
+    return set(_clean_words(text, extra_strip_words))
 
 
 def _artist_words(artist_full: str) -> list[str]:
+    """Every word of the artist name, plus apostrophe-less spellings: filenames
+    written as "barry_cant_swim" have no apostrophe to split "Can't" into "can"+"t"."""
     words = []
     for a in re.split(r"[,&/]", artist_full):
         words.extend(re.findall(r"[a-zA-Z0-9]+", a))
+        words.extend(re.findall(r"[a-zA-Z0-9]+", re.sub(r"['’]", "", a)))
     return words
 
 
@@ -197,7 +203,14 @@ def is_exact_title_match(file_path: str, artist_full: str, title_main: str) -> b
     stem = re.sub(r"\.[a-zA-Z0-9]{2,4}$", "", filename)
     a_words = _artist_words(artist_full)
 
-    target_tokens = _clean_tokens(title_main)
+    # Artist words are stripped from BOTH sides. Stripping only the filename side broke
+    # any title sharing a word with the artist's name ("Can We Still Be Friends" by
+    # "Barry Can't Swim": the filename lost "can", the title kept it, no match ever).
+    strip_words = a_words
+    target_tokens = _clean_tokens(title_main, extra_strip_words=strip_words)
+    if not target_tokens:                           # title made only of artist words
+        strip_words = []
+        target_tokens = _clean_tokens(title_main)
     if not target_tokens:
         return False
 
@@ -221,8 +234,11 @@ def is_exact_title_match(file_path: str, artist_full: str, title_main: str) -> b
 
     for cand in candidates_to_check:
         cand_no_num = _LEADING_NUM_RE.sub("", cand)
-        cand_tokens = _clean_tokens(cand_no_num, extra_strip_words=a_words)
+        cand_tokens = _clean_tokens(cand_no_num, extra_strip_words=strip_words)
         if cand_tokens == target_tokens:
+            return True
+        # "Rollercoaster" vs "Roller Coaster": same word, spaced differently
+        if "".join(_clean_words(cand_no_num, strip_words)) == "".join(_clean_words(title_main, strip_words)):
             return True
     return False
 
@@ -293,6 +309,27 @@ def _lossless_candidate(item: dict) -> tuple[int, int] | None:
     return None
 
 
+def _search(query: str) -> list[dict]:
+    resp = _api_post("/search", {"query": query, "mode": "global"})
+    time.sleep(SEARCH_WAIT_SECONDS)
+    return _fetch_all_results(resp["token"])
+
+
+def _fallback_query(artist_full: str, title_main: str) -> str | None:
+    """A prefix search for a single long word ("Rollercoaster" -> "Roller"), which
+    also finds files spelled "Roller Coaster". Only worth trying for those titles."""
+    words = re.findall(r"[A-Za-z0-9]+", title_main)
+    if len(words) != 1 or len(words[0]) < 8:
+        return None
+    primary_artist = artist_full.split(",")[0].strip()
+    return f"{primary_artist} {words[0][:max(5, round(len(words[0]) * 0.45))]}".strip()
+
+
+def _has_title_match(items: list[dict], artist_full: str, title_main: str, title_full: str) -> bool:
+    return any(is_exact_title_match(i.get("file_path") or "", artist_full, title_main)
+               and passes_version_guard((i.get("file_path") or "").lower(), title_full) for i in items)
+
+
 def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str]) -> tuple[dict | None, int]:
     """One search attempt. mode: 'lossless' (FLAC, WAV or AIFF) or 'mp3' (a genuine
     320kbps fallback). Returns (best candidate or None, number of raw results seen)
@@ -301,9 +338,11 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
     query = _build_query(artist_full, title_full)
     title_main = re.split(r"\s+-\s+", title_full, maxsplit=1)[0]
 
-    resp = _api_post("/search", {"query": query, "mode": "global"})
-    time.sleep(SEARCH_WAIT_SECONDS)
-    items = _fetch_all_results(resp["token"])
+    items = _search(query)
+    fallback = _fallback_query(artist_full, title_main)
+    if fallback and not _has_title_match(items, artist_full, title_main, title_full):
+        # a title spelled as one word here may be two words in people's filenames
+        items = items + _search(fallback)
 
     cands = []
     for it in items:

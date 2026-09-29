@@ -411,5 +411,39 @@ class FormatHierarchyTest(SyncFixture):
         self.assertEqual(states["id-q"].local_path.suffix, ".flac", "FLAC outranks a bigger WAV, even when WAV is the wanted container")
 
 
+class MatcherTest(unittest.TestCase):
+    """Real filenames from Soulseek that the matcher used to get wrong."""
+
+    def match(self, path, artist, title):
+        return soulseek.is_exact_title_match(path, artist, title) and soulseek.passes_version_guard(path.lower(), title)
+
+    def test_title_sharing_a_word_with_the_artist_name(self):
+        a, t = "Barry Can't Swim, Laurence Guy", "Can We Still Be Friends?"
+        self.assertTrue(self.match(r"x\Barry Can't Swim - Can We Still Be Friends-.aiff", a, t))
+        self.assertTrue(self.match(r"x-barry_cant_swim-can_we_still_be_friends_(with_laurence_guy)_(original_mix).flac", a, t))
+        self.assertTrue(self.match("x\Barry Can’t Swim - More Content - 02 - Can We Still Be Friends.mp3", a, t))
+        self.assertFalse(self.match(r"x\Barry Can't Swim - God Is The Space Between Us.flac", a, t))
+        self.assertFalse(self.match(r"x\Barry Can't Swim - Can We Still Be Friends (Someone Remix).flac", a, t))
+
+    def test_one_word_vs_two_word_spelling(self):
+        self.assertTrue(self.match(r"x\Modjo - Roller Coaster.mp3", "Modjo", "Rollercoaster"))
+        self.assertFalse(self.match(r"x\Modjo - Roller Skate.mp3", "Modjo", "Rollercoaster"))
+
+    def test_prefix_fallback_query_only_for_single_long_words(self):
+        self.assertEqual(soulseek._fallback_query("Modjo", "Rollercoaster"), "Modjo Roller")
+        self.assertIsNone(soulseek._fallback_query("Bicep", "Opal"))
+        self.assertIsNone(soulseek._fallback_query("Bicep", "Two Words Here"))
+
+    def test_fallback_search_finds_the_two_word_spelling(self):
+        events = []
+        nico = FakeNicotine(Path(tempfile.mkdtemp()), events)
+        nico.catalog[soulseek._fallback_query("Modjo", "Rollercoaster")] = [{
+            "username": "u1", "file_path": r"m\Modjo - Roller Coaster.wav", "size": 1000, "file_attributes": {},
+            "free_upload_slots": True, "upload_speed": 1000, "_kind": "wav16"}]
+        with mock.patch.object(soulseek, "_api_post", nico.api_post),              mock.patch.object(soulseek, "_fetch_all_results", nico.fetch_all_results),              mock.patch.object(soulseek, "SEARCH_WAIT_SECONDS", 0):
+            best, _ = soulseek.find_candidate("Modjo", "Rollercoaster", "lossless", set())
+        self.assertEqual(best["username"], "u1")
+
+
 if __name__ == "__main__":
     unittest.main()
