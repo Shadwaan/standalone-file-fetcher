@@ -324,6 +324,12 @@ async def _idle_watchdog():
         await asyncio.sleep(5)
         idle = time.monotonic() - _last_heartbeat_at
         if idle > _AUTO_SHUTDOWN_IDLE:
+            # Never kill the server mid-sync. A background browser tab gets its
+            # timers throttled, so heartbeats stop long before a multi-hour
+            # Soulseek sync finishes -- and shutting down here abandons the run.
+            # Once the sync ends, the still-stale heartbeat shuts it down cleanly.
+            if _orchestrator is not None and getattr(_orchestrator, "_running", False):
+                continue
             logger.info("No browser heartbeat for %.0fs — auto-shutdown", idle)
             os.kill(os.getpid(), signal.SIGINT)
             return

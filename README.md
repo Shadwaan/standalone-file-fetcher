@@ -84,6 +84,7 @@ sff will start Nicotine+ for you automatically on the next Sync if it isn't alre
 ### How it's different from the YouTube path
 - Each playlist gets its own **separate "&lt;name&gt; FLAC" playlist** in Rekordbox, alongside its normal MP3 one — the two coexist, neither overwrites the other.
 - Soulseek downloads depend on other people being online and sharing the right files, so a sync can take a while and occasionally can't find every track. sff automatically retries stalled or dead sources and only falls back to a genuine 320kbps MP3 if no real FLAC turns up anywhere on the network.
+- A Soulseek sync can run for a long time (searching, then waiting on other people's uploads). Rekordbox must be closed when you **start** it, but once downloads are underway you can open Rekordbox freely: sff only touches its library at the very end, and if Rekordbox is open at that point it **waits for you to close it** instead of importing into an open database. The auto-shutdown that follows the browser tab closing also holds off until the sync finishes.
 - Every FLAC is checked for real high-frequency content, a heuristic that catches a "FLAC" that's secretly a lossy file (MP3, etc.) re-encoded into a lossless container rather than a genuinely lossless source — flagged as suspect in the sync results if so, not silently trusted.
 
 ---

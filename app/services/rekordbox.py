@@ -828,6 +828,28 @@ def find_content_by_title(artist: str, title: str) -> tuple[str, str] | None:
         return None
 
 
+def find_playlist_id(playlist_name: str) -> str | None:
+    """Read-only lookup of a playlist's ID by name. Unlike find_or_create_playlist
+    this never writes, so it's safe to call before the pipeline is ready to
+    touch Rekordbox."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        found = None
+        for pl in db.session.query(tables.DjmdPlaylist).all():
+            if pl.Name == playlist_name:
+                found = str(pl.ID)
+                break
+        db.session.close()
+        db.engine.dispose()
+        return found
+    except Exception as e:
+        logger.warning("Failed to look up playlist '%s': %s", playlist_name, e)
+        return None
+
+
 def get_playlist_track_titles(playlist_id: str) -> set[str]:
     """Titles of every track currently in a Rekordbox playlist -- the ground
     truth for "is this track already done", since it reads the durable

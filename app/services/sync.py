@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -589,6 +590,20 @@ class SyncOrchestrator:
     # Rekordbox exactly once per run -- never mid-resolve -- is what keeps
     # playlist ordering from ever going stale/colliding between runs.
 
+    def _wait_until_rekordbox_closed(self, reason: str):
+        """Block until Rekordbox is closed. Writing to master.db while Rekordbox
+        has it open corrupts it, and a Soulseek sync runs long enough that "it
+        was closed when we started" says nothing about now -- so this is called
+        right before anything touches the database, not just once at the start."""
+        announced = False
+        while self._is_rekordbox_running():
+            if not announced:
+                logger.warning("Rekordbox is open -- pausing until it's closed (%s)", reason)
+                announced = True
+            self.progress.phase = "waiting_rekordbox"
+            self.progress.message = f"Waiting for Rekordbox to close ({reason})..."
+            time.sleep(5)
+
     def _do_sync_soulseek(self) -> dict:
         if self._refuse_if_rekordbox_running():
             return self.get_progress()
@@ -654,10 +669,12 @@ class SyncOrchestrator:
                 )
                 flac_state["display_name"] = display_name
 
-                rb_playlist_id = rb.find_or_create_playlist(display_name)
-                if not flac_state.get("rb_playlist_id"):
-                    flac_state["rb_playlist_id"] = rb_playlist_id
-                    flac_state["created_at"] = datetime.now().isoformat()
+                # Up to the import step, Rekordbox is only READ (what's already
+                # done) -- nothing is written until every download has resolved.
+                # Reads still wait if Rekordbox is open: a failed read looks like
+                # "nothing in the library yet" and would re-download everything.
+                self._wait_until_rekordbox_closed("checking what's already in your library")
+                rb_playlist_id = flac_state.get("rb_playlist_id") or rb.find_playlist_id(display_name)
 
                 # Two independent checks for "already done", not just one: our own
                 # state file AND Rekordbox's actual database. State can be lost,
@@ -665,7 +682,7 @@ class SyncOrchestrator:
                 # or otherwise go stale -- without this second check, that gets
                 # every one of its tracks silently re-downloaded and duplicated.
                 known_ids = set(flac_state["tracks"].keys())
-                rb_existing_titles = rb.get_playlist_track_titles(rb_playlist_id)
+                rb_existing_titles = rb.get_playlist_track_titles(rb_playlist_id) if rb_playlist_id else set()
                 current_ids = {t.spotify_id for t in spotify_tracks}
                 new_tracks = [
                     t for t in spotify_tracks
@@ -691,6 +708,7 @@ class SyncOrchestrator:
                 })
                 self.progress.tracks_total += len(new_tracks)
 
+                states = {}
                 if new_tracks:
                     def _progress_cb(msg):
                         self.progress.message = msg
@@ -701,7 +719,19 @@ class SyncOrchestrator:
                     self.progress.phase = "downloading"
                     soulseek.resolve_all(states, on_progress=_progress_cb)
 
+                if new_tracks or removed_ids:
+                    # Every download has resolved -- this is the first moment the
+                    # run writes to Rekordbox. The sync may have been going for
+                    # hours, so "was it closed when we started?" proves nothing;
+                    # wait here (don't write into an open database) if it's open now.
+                    self._wait_until_rekordbox_closed("tracks are ready to import")
                     self.progress.phase = "importing"
+                    rb_playlist_id = rb.find_or_create_playlist(display_name)
+                    flac_state["rb_playlist_id"] = rb_playlist_id
+                    if not flac_state.get("created_at"):
+                        flac_state["created_at"] = datetime.now().isoformat()
+
+                if new_tracks:
                     playlist_folder = Path(music_folder) / display_name
                     playlist_folder.mkdir(parents=True, exist_ok=True)
                     originals_dir = playlist_folder / "_originals"
@@ -756,14 +786,20 @@ class SyncOrchestrator:
 
                 # Reorder every run, from scratch, against true Spotify order --
                 # this is what keeps a late-arriving track from desyncing everything.
-                ordered_titles = [t.title for t in spotify_tracks]
-                rb.reorder_playlist_by_titles(rb_playlist_id, ordered_titles)
+                if new_tracks or removed_ids:
+                    ordered_titles = [t.title for t in spotify_tracks]
+                    rb.reorder_playlist_by_titles(rb_playlist_id, ordered_titles)
+                    # Flush per playlist, right after its writes, rather than once
+                    # at the very end of a possibly hours-long run.
+                    rb.flush_wal()
 
                 if pl_id not in self._state["playlists"]:
                     self._state["playlists"][pl_id] = pl_state
                 self._state["playlists"][pl_id]["snapshot_id"] = pl.get("snapshot_id", "")
+                # Persist after every playlist so a mid-run interruption can't lose
+                # what's already been imported.
+                self._save_state()
 
-            rb.flush_wal()
             self.progress.status = "done"
             self.progress.phase = "complete"
             self.progress.message = (
