@@ -1,6 +1,6 @@
 # Standalone File Fetcher (sff)
 
-Watches your Spotify "FF"-prefixed playlists, downloads new tracks — from YouTube as 320 kbps MP3, or from Soulseek as verified FLAC — and imports them into your **Rekordbox** library — playlists, ordering, tags, and all. Runs locally as a tiny web app at `http://localhost:8899`.
+Watches your Spotify "FF"-prefixed playlists, downloads new tracks — from YouTube as 320 kbps MP3, or from Soulseek as lossless WAV / AIFF / FLAC — and imports them into your **Rekordbox** library — playlists, ordering, tags, and all. Runs locally as a tiny web app at `http://localhost:8899`.
 
 ---
 
@@ -67,9 +67,9 @@ If you also use Traktor (Native Instruments DJ software), open the **Config** ca
 
 ---
 
-## Optional: FLAC downloads via Soulseek (instead of YouTube MP3)
+## Optional: lossless downloads via Soulseek (instead of YouTube MP3)
 
-By default sff downloads MP3s from YouTube. If you'd rather have real FLACs, sff can download from the Soulseek network instead — using **[Nicotine+](https://nicotine-plus.org)** as the actual Soulseek client, controlled via its **[API Nicotine Plus](https://github.com/palaueb/api-nicotine-plus)** plugin (a small local REST API that plugs into Nicotine+).
+By default sff downloads MP3s from YouTube. If you'd rather have real lossless files, sff can download from the Soulseek network instead — using **[Nicotine+](https://nicotine-plus.org)** as the actual Soulseek client, controlled via its **[API Nicotine Plus](https://github.com/palaueb/api-nicotine-plus)** plugin (a small local REST API that plugs into Nicotine+).
 
 ### One-time setup
 1. Install **Nicotine+**: [nicotine-plus.org/download](https://nicotine-plus.org/download)
@@ -77,17 +77,21 @@ By default sff downloads MP3s from YouTube. If you'd rather have real FLACs, sff
    - **Windows**: `%AppData%\nicotine\plugins\`
    - **Mac/Linux**: wherever your Nicotine+ config lives, under `plugins/`
 3. In Nicotine+: **Preferences → Plugins**, enable **"API Nicotine Plus"**.
-4. In sff's **Config** card, switch **Download source** to **Soulseek (FLAC, via Nicotine+)**.
+4. In sff's **Config** card, switch **Download source** to **Soulseek (lossless, via Nicotine+)**. Three checkboxes appear: **WAV**, **AIFF** and **FLAC**. Tick whichever you want (one or several) — they only show when Soulseek is selected; the YouTube path always produces plain MP3.
 
 sff will start Nicotine+ for you automatically on the next Sync if it isn't already running, as long as it's installed at a default location. If you installed it somewhere non-standard, set `NICOTINE_EXE_PATH` in `app/.env` to its full executable path.
 
 ### How it's different from the YouTube path
-- Each playlist gets its own **separate "&lt;name&gt; FLAC" playlist** in Rekordbox, alongside its normal MP3 one — the two coexist, neither overwrites the other.
-- Soulseek downloads depend on other people being online and sharing the right files, so a sync can take a while and occasionally can't find every track. sff automatically retries stalled or dead sources and only falls back to a genuine 320kbps MP3 if no real FLAC turns up anywhere on the network.
+- **One playlist per format you ticked**, named with the format as a suffix — "Deep tech WAV", "Deep tech AIFF", "Deep tech FLAC" — alongside the normal MP3 one. They coexist; none overwrites another. Each lives in its own folder named after the playlist.
+- **Resync only adds what's new.** sff walks each ticked format's playlist and adds just the Spotify tracks missing from it. Rekordbox counts too: if a playlist or track is already there (even one you made by hand), it isn't downloaded again.
+- **Adding a format later doesn't re-download anything.** Tick AIFF after you already have FLAC and sff derives the AIFFs from the files it already has.
+- **What it looks for, in order of preference:** FLAC first, then WAV and AIFF as equals, and a genuine 320 kbps MP3 only as a last resort after every lossless attempt has failed. Within a format it prefers sources with a free upload slot, then better evidence and faster peers. WAV/AIFF results rarely carry any metadata, so they're accepted on weaker evidence and *verified after download* — a file that isn't really lossless PCM is rejected.
+- **Every output ends up 16-bit at 44.1 or 48 kHz**, the range CDJs and most standalone players handle. 24/32-bit files are dithered down; 88.2/176.4 kHz is resampled to 44.1 and 96/192 kHz to 48 (exact integer ratios, high-quality resampler). Files already in range are left untouched. The original download is kept in an `_originals` folder (never deleted).
+- **Tags and cover art are written into every file** (including WAV and AIFF, as ID3 chunks), so Rekordbox shows artwork and metadata.
+- Soulseek downloads depend on other people being online and sharing the right files, so a sync can take a while and occasionally can't find every track. sff retries stalled or dead sources automatically.
 - A Soulseek sync can run for a long time (searching, then waiting on other people's uploads). Rekordbox must be closed when you **start** it, but once downloads are underway you can open Rekordbox freely: sff only touches its library at the very end, and if Rekordbox is open at that point it **waits for you to close it** instead of importing into an open database. The auto-shutdown that follows the browser tab closing also holds off until the sync finishes.
-- Whatever gets downloaded is normalised to **16-bit FLAC at 44.1 or 48 kHz**, the range CDJs and most standalone players handle. 24-bit and 88.2 kHz+ files are converted down, with the original kept in an `_originals` folder next to the playlist (never deleted); files already at 44.1/48 kHz are left alone rather than resampled.
 - Already have the file? Before searching, sff checks Nicotine+'s download folder and its existing queue, so tracks from an interrupted sync are picked up instead of re-downloaded. This assumes Nicotine+ saves to `D:\Music\Nicotine`; if yours saves elsewhere, set `NICOTINE_DOWNLOAD_DIR` in `app/.env`.
-- Every FLAC is checked for real high-frequency content, a heuristic that catches a "FLAC" that's secretly a lossy file (MP3, etc.) re-encoded into a lossless container rather than a genuinely lossless source (checked on the file as downloaded, before any conversion) — flagged as suspect in the sync results if so, not silently trusted.
+- **Lossy-transcode check.** Every lossless file is checked, as downloaded, for the tell-tale cutoff of an MP3 re-wrapped as FLAC/WAV/AIFF (a sharp cliff in the spectrum around 16–20 kHz). Suspects are flagged in the sync results but kept. In testing it caught every 128/192/256 kbps transcode with no false alarms on 34 genuine files; a **320 kbps** transcode can't be told apart from a genuine file, so treat "not flagged" as "no evidence of fakery", not proof.
 
 ---
 

@@ -571,6 +571,20 @@
                         <span class="config-label">Nicotine+</span>
                         <span class="config-value" id="soulseekStatusValue">Checking…</span>
                     </div>
+                    <div class="config-row" id="outputFormatsRow" style="display:${cfg.download_source === 'soulseek' ? 'flex' : 'none'}">
+                        <span class="config-label">Output format</span>
+                        <span class="config-value" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+                            ${(cfg.available_formats || []).map(f => `
+                                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                                    <input type="checkbox" class="outputFormatBox" value="${f.key}"
+                                           ${(cfg.output_formats || []).includes(f.key) ? 'checked' : ''}
+                                           onchange="setOutputFormats()"
+                                           style="cursor:pointer;width:16px;height:16px;accent-color:#1db954" />
+                                    ${f.label}
+                                </label>`).join('')}
+                            <span style="color:#777;font-size:12px">one Rekordbox playlist per format</span>
+                        </span>
+                    </div>
                 `;
                 if (cfg.download_source === 'soulseek') {
                     checkSoulseekStatus();
@@ -681,10 +695,38 @@
                     body: JSON.stringify({ source }),
                 });
                 document.getElementById('soulseekStatusRow').style.display = source === 'soulseek' ? 'flex' : 'none';
+                document.getElementById('outputFormatsRow').style.display = source === 'soulseek' ? 'flex' : 'none';
+                if (lastConfig) lastConfig.download_source = source;
+                loadTrackedPlaylists();
                 if (source === 'soulseek') checkSoulseekStatus();
             } catch (e) {
                 alert('Failed to set download source: ' + e.message);
             }
+        }
+
+        async function setOutputFormats() {
+            const formats = Array.from(document.querySelectorAll('.outputFormatBox'))
+                .filter(b => b.checked).map(b => b.value);
+            if (formats.length === 0) {
+                alert('Choose at least one output format.');
+                await loadConfig();          // re-render with the saved selection
+                return;
+            }
+            try {
+                const res = await fetch('/api/config/output-formats', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ formats }),
+                });
+                if (!res.ok) {
+                    const d = await res.json();
+                    alert(d.error || 'Could not save the output formats');
+                }
+            } catch (e) {
+                alert('Failed to save output formats: ' + e.message);
+            }
+            await loadConfig();
+            loadTrackedPlaylists();
         }
 
         async function checkSoulseekStatus() {
@@ -749,12 +791,25 @@
             }
         }
 
+        // One badge per output format: green if that format's playlist exists, grey if it's
+        // selected for the next Soulseek sync but hasn't been created yet.
+        function formatBadges(pl, cfg) {
+            const selected = cfg.download_source === 'soulseek' ? (cfg.output_formats || []) : [];
+            return (cfg.available_formats || [])
+                .filter(f => pl.variants[f.key] || selected.includes(f.key))
+                .map(f => pl.variants[f.key]
+                    ? `<span class="badge" style="background:#1db954;color:#000">${f.label}: ${pl.variants[f.key].track_count} tracks</span>`
+                    : `<span class="badge" style="background:#333;color:#888">No ${f.label} playlist yet</span>`)
+                .join(' ');
+        }
+
         // Tracked playlists (sync state) + stop-syncing
         async function loadTrackedPlaylists() {
             try {
                 const res = await fetch('/api/playlists/tracked');
                 const data = await res.json();
                 const playlists = data.playlists || [];
+                const cfg = lastConfig || await (await fetch('/api/config')).json();
                 const card = document.getElementById('trackedCard');
                 const list = document.getElementById('trackedList');
                 if (playlists.length === 0) {
@@ -767,9 +822,7 @@
                         <span class="playlist-name">${pl.display_name}</span>
                         <span class="playlist-meta">
                             ${pl.track_count} tracks
-                            ${pl.has_flac_variant
-                                ? `<span class="badge" style="background:#1db954;color:#000">FLAC: ${pl.flac_track_count} tracks</span>`
-                                : `<span class="badge" style="background:#333;color:#888">No FLAC playlist yet</span>`}
+                            ${formatBadges(pl, cfg)}
                             <button class="stop-btn" onclick="stopSyncing('${pl.id}', '${(pl.display_name || '').replace(/'/g, "\\'")}')">✕ Stop syncing</button>
                         </span>
                     </li>

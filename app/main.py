@@ -118,7 +118,7 @@ SPOTIFY_CACHE_FILE = Path(__file__).parent / ".spotify_cache"
 @app.get("/api/config")
 async def get_config():
     """Get current configuration (non-sensitive). Resolves music_folder + traktor toggle via app_config."""
-    from services import app_config
+    from services import app_config, audio_formats
     from services import platform_paths
     cfg = app_config.load()
     traktor_nml = os.getenv("TRAKTOR_NML_PATH", platform_paths.DEFAULT_TRAKTOR_NML or "")
@@ -137,6 +137,8 @@ async def get_config():
         "ffmpeg_path": platform_paths.FFMPEG_PATH,
         "spotify_signed_in": SPOTIFY_CACHE_FILE.exists(),
         "download_source": app_config.get_download_source(),
+        "output_formats": app_config.get_output_formats(),
+        "available_formats": [{"key": f.key, "label": f.label} for f in audio_formats.FORMATS.values()],
     }
 
 
@@ -170,6 +172,10 @@ class DownloadSourceUpdate(BaseModel):
     source: str  # "youtube" or "soulseek"
 
 
+class OutputFormatsUpdate(BaseModel):
+    formats: list[str]  # any of "flac", "aiff", "wav"
+
+
 @app.post("/api/config/traktor")
 async def set_traktor(payload: TraktorToggleUpdate):
     """Enable/disable Traktor sync. When enabled, each sync also writes to collection.nml."""
@@ -196,6 +202,17 @@ async def set_download_source(payload: DownloadSourceUpdate):
     try:
         cfg = app_config.set_download_source(payload.source)
         return {"status": "ok", "download_source": cfg["download_source"]}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/config/output-formats")
+async def set_output_formats(payload: OutputFormatsUpdate):
+    """Which lossless formats a Soulseek sync produces -- one Rekordbox playlist each."""
+    from services import app_config
+    try:
+        cfg = app_config.set_output_formats(payload.formats)
+        return {"status": "ok", "output_formats": app_config.get_output_formats()}
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -281,16 +298,21 @@ async def get_tracked_playlists():
     orchestrator = _get_orchestrator()
     tracked = []
     for pid, pdata in orchestrator._state.get("playlists", {}).items():
-        flac = pdata.get("flac_variant")
+        variants = {
+            fmt: {
+                "display_name": v.get("display_name"),
+                "track_count": len(v.get("tracks", {})),
+                "rb_playlist_id": v.get("rb_playlist_id"),
+            }
+            for fmt, v in (pdata.get("variants") or {}).items()
+            if v.get("rb_playlist_id")
+        }
         tracked.append({
             "id": pid,
             "name": pdata.get("name", pid),
             "display_name": pdata.get("display_name", pdata.get("name", pid)),
             "track_count": len(pdata.get("tracks", {})),
-            "has_flac_variant": bool(flac and flac.get("rb_playlist_id")),
-            "flac_display_name": (flac or {}).get("display_name"),
-            "flac_track_count": len((flac or {}).get("tracks", {})),
-            "flac_rb_playlist_id": (flac or {}).get("rb_playlist_id"),
+            "variants": variants,
         })
     return {"playlists": tracked}
 

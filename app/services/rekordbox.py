@@ -840,24 +840,72 @@ def find_content_by_title(artist: str, title: str) -> tuple[str, str] | None:
 
 def find_playlist_id(playlist_name: str) -> str | None:
     """Read-only lookup of a playlist's ID by name. Unlike find_or_create_playlist
-    this never writes, so it's safe to call before the pipeline is ready to
-    touch Rekordbox."""
+    this never writes, so it's safe to call before the pipeline is ready to touch
+    Rekordbox. An exact match wins; otherwise a case-insensitive one is accepted,
+    because a playlist made by hand ("Deep Tech AIFF") shouldn't be duplicated just
+    because Spotify's name for it is "Deep tech"."""
     try:
         from pyrekordbox import Rekordbox6Database
         from pyrekordbox.db6 import tables
 
         db = Rekordbox6Database()
-        found = None
+        exact = insensitive = None
         for pl in db.session.query(tables.DjmdPlaylist).all():
-            if pl.Name == playlist_name:
-                found = str(pl.ID)
+            name = pl.Name or ""
+            if name == playlist_name:
+                exact = str(pl.ID)
                 break
+            if insensitive is None and name.lower() == playlist_name.lower():
+                insensitive = str(pl.ID)
         db.session.close()
         db.engine.dispose()
-        return found
+        return exact or insensitive
     except Exception as e:
         logger.warning("Failed to look up playlist '%s': %s", playlist_name, e)
         return None
+
+
+def get_playlist_name(playlist_id: str) -> str | None:
+    """A playlist's current name, or None if it no longer exists (deleted or
+    renamed away in Rekordbox) -- so a stored ID can be trusted only if it still
+    resolves."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        pl = db.session.query(tables.DjmdPlaylist).filter_by(ID=str(playlist_id)).first()
+        name = pl.Name if pl else None
+        db.session.close()
+        db.engine.dispose()
+        return name
+    except Exception as e:
+        logger.warning("Failed to read playlist %s: %s", playlist_id, e)
+        return None
+
+
+def get_playlist_track_paths(playlist_id: str) -> dict[str, str]:
+    """{title: file path} for every track currently in a Rekordbox playlist. Reads
+    the playlist itself, so each output format's state comes from ITS OWN playlist
+    -- a library-wide title search could return the FLAC copy's path when asked
+    about the AIFF one."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        songs = db.session.query(tables.DjmdSongPlaylist).filter_by(PlaylistID=playlist_id).all()
+        out = {}
+        for s in songs:
+            c = db.session.query(tables.DjmdContent).filter_by(ID=s.ContentID).first()
+            if c and c.Title:
+                out[c.Title] = c.FolderPath or ""
+        db.session.close()
+        db.engine.dispose()
+        return out
+    except Exception as e:
+        logger.warning("Failed to read playlist tracks for '%s': %s", playlist_id, e)
+        return {}
 
 
 def get_playlist_track_titles(playlist_id: str) -> set[str]:

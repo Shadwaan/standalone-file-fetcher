@@ -1,5 +1,5 @@
 """
-Tags and cover art for files that come from Soulseek (FLAC, AIFF).
+Tags and cover art for files that come from Soulseek (FLAC, AIFF, WAV).
 
 Files from random Soulseek peers arrive with inconsistent tags, often no cover
 (or the wrong one), and leftovers from other people's DJ software (Serato/Traktor
@@ -128,14 +128,15 @@ def _write_flac(path: Path, track, artwork: bytes | None, carry: dict) -> None:
     f.save()
 
 
-def _write_aiff(path: Path, track, artwork: bytes | None, carry: dict) -> None:
+def _write_id3_audio(path: Path, track, artwork: bytes | None, carry: dict, opener) -> None:
+    """AIFF and WAV both keep an ID3 tag in a chunk of the file; only the mutagen
+    class that opens them differs."""
     from mutagen import id3
-    from mutagen.aiff import AIFF
 
-    a = AIFF(str(path))
+    a = opener(str(path))
     if a.tags is not None:
         a.delete()                     # start from a clean ID3 chunk
-        a = AIFF(str(path))
+        a = opener(str(path))
     a.add_tags()
     t = a.tags
     utf16 = 1                          # ID3v2.3 allows Latin-1 or UTF-16 only
@@ -155,6 +156,16 @@ def _write_aiff(path: Path, track, artwork: bytes | None, carry: dict) -> None:
     a.save(v2_version=3)               # v2.3: what Rekordbox and Pioneer players read most reliably
 
 
+def _write_aiff(path: Path, track, artwork: bytes | None, carry: dict) -> None:
+    from mutagen.aiff import AIFF
+    _write_id3_audio(path, track, artwork, carry, AIFF)
+
+
+def _write_wav(path: Path, track, artwork: bytes | None, carry: dict) -> None:
+    from mutagen.wave import WAVE
+    _write_id3_audio(path, track, artwork, carry, WAVE)
+
+
 def write_tags(path: Path, track, artwork: bytes | None = None, carry: dict | None = None) -> bool:
     """Write the clean tag set + cover into a FLAC or AIFF. Returns False (and
     logs) instead of raising: bad tags shouldn't fail a download."""
@@ -167,6 +178,8 @@ def write_tags(path: Path, track, artwork: bytes | None = None, carry: dict | No
             _write_flac(path, track, artwork, carry)
         elif ext in (".aiff", ".aif"):
             _write_aiff(path, track, artwork, carry)
+        elif ext == ".wav":
+            _write_wav(path, track, artwork, carry)
         else:
             logger.info("No tag writer for %s files, skipping %s", ext, path.name)
             return False

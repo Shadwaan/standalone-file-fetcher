@@ -73,7 +73,10 @@ class SyncOrchestrator:
         """Load sync state from disk."""
         if STATE_FILE.exists():
             try:
-                return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                from services.sync_soulseek import migrate_state
+                migrate_state(state)
+                return state
             except (json.JSONDecodeError, OSError):
                 pass
         return {"playlists": {}, "last_sync": None}
@@ -581,14 +584,9 @@ class SyncOrchestrator:
         self._save_state()
         return self.get_progress()
 
-    # ─── Soulseek / FLAC pipeline ───────────────────────────────────────────
-    # Distinct from the yt-dlp path above: Soulseek downloads are inherently
-    # unpredictable in timing (peer-dependent), so instead of a per-track
-    # blocking download call, this searches+queues every new track up front,
-    # then polls (self-healing stalled/dead sources) until everything is
-    # resolved, and ONLY THEN does a single batch Rekordbox import. Touching
-    # Rekordbox exactly once per run -- never mid-resolve -- is what keeps
-    # playlist ordering from ever going stale/colliding between runs.
+    # ─── Soulseek pipeline ──────────────────────────────────────────────────
+    # Lives in services/sync_soulseek.py; it needs this orchestrator's state,
+    # progress reporting, and the "wait until Rekordbox is closed" guard.
 
     def _wait_until_rekordbox_closed(self, reason: str):
         """Block until Rekordbox is closed. Writing to master.db while Rekordbox
@@ -605,218 +603,5 @@ class SyncOrchestrator:
             time.sleep(5)
 
     def _do_sync_soulseek(self) -> dict:
-        if self._refuse_if_rekordbox_running():
-            return self.get_progress()
-
-        from services import soulseek, tagging
-        from services.spotify import SpotifyService
-        from services import rekordbox as rb
-
-        status = soulseek.get_status()
-        if not status["running"]:
-            self.progress.phase = "starting_nicotine"
-            self.progress.message = "Nicotine+ isn't running -- starting it..."
-            launch_result = soulseek.launch()
-            if not launch_result["api_reachable"]:
-                self.progress.status = "error"
-                self.progress.message = launch_result["error"] or (
-                    "Nicotine+ needs to be running for Soulseek downloads. "
-                    "Please start it and enable the 'API Nicotine Plus' plugin."
-                )
-                self.progress.errors.append(self.progress.message)
-                return self.get_progress()
-        elif not status["api_reachable"]:
-            self.progress.status = "error"
-            self.progress.message = (
-                "Nicotine+ is running but its API plugin isn't reachable. "
-                "Enable 'API Nicotine Plus' in Preferences -> Plugins."
-            )
-            self.progress.errors.append(self.progress.message)
-            return self.get_progress()
-
-        music_folder = app_config.get_music_folder()
-        nicotine_download_dir = os.getenv("NICOTINE_DOWNLOAD_DIR", r"D:\Music\Nicotine")
-
-        self.progress.phase = "discovering"
-        self.progress.message = "Connecting to Spotify..."
-        logger.info("=== Soulseek/FLAC sync started ===")
-
-        spotify = SpotifyService()
-        playlists = spotify.get_prefixed_playlists()
-        self.progress.playlists_found = len(playlists)
-
-        try:
-            for pl in playlists:
-                pl_id = pl["id"]
-                pl_name = pl["name"]
-                base_display_name = pl["display_name"]
-                display_name = f"{base_display_name} FLAC"
-
-                self.progress.phase = "syncing"
-                self.progress.message = f"Processing playlist: {pl_name} (FLAC)"
-                logger.info("Processing playlist: %s -> '%s'", pl_name, display_name)
-
-                spotify_tracks = spotify.get_playlist_tracks(pl_id, pl_name)
-                for t in spotify_tracks:
-                    t.file_extension = "flac"
-                    t.playlist_name = display_name
-
-                pl_state = self._state["playlists"].setdefault(
-                    pl_id, {"tracks": {}, "snapshot_id": "", "name": pl_name, "display_name": base_display_name},
-                )
-                flac_state = pl_state.setdefault(
-                    "flac_variant", {"tracks": {}, "rb_playlist_id": None, "display_name": display_name, "created_at": None},
-                )
-                flac_state["display_name"] = display_name
-
-                # Up to the import step, Rekordbox is only READ (what's already
-                # done) -- nothing is written until every download has resolved.
-                # Reads still wait if Rekordbox is open: a failed read looks like
-                # "nothing in the library yet" and would re-download everything.
-                self._wait_until_rekordbox_closed("checking what's already in your library")
-                rb_playlist_id = flac_state.get("rb_playlist_id") or rb.find_playlist_id(display_name)
-
-                # Two independent checks for "already done", not just one: our own
-                # state file AND Rekordbox's actual database. State can be lost,
-                # never written (e.g. a track added outside the normal Sync flow),
-                # or otherwise go stale -- without this second check, that gets
-                # every one of its tracks silently re-downloaded and duplicated.
-                known_ids = set(flac_state["tracks"].keys())
-                rb_existing_titles = rb.get_playlist_track_titles(rb_playlist_id) if rb_playlist_id else set()
-                current_ids = {t.spotify_id for t in spotify_tracks}
-                new_tracks = [
-                    t for t in spotify_tracks
-                    if t.spotify_id not in known_ids and t.title not in rb_existing_titles
-                ]
-                # A track Rekordbox already has but our state didn't know about --
-                # backfill the state instead of silently doing nothing, so future
-                # runs (and the UI's FLAC-playlist badge) see it correctly too.
-                for t in spotify_tracks:
-                    if t.spotify_id in known_ids or t.title not in rb_existing_titles:
-                        continue
-                    found = rb.find_content_by_title(t.artist, t.title)
-                    file_path = found[1] if found else ""
-                    flac_state["tracks"][t.spotify_id] = {
-                        "filename": Path(file_path).name if file_path else t.filename,
-                        "file_path": file_path, "artist": t.artist, "title": t.title,
-                    }
-                removed_ids = known_ids - current_ids
-
-                self.progress.playlist_details.append({
-                    "name": pl_name, "display_name": display_name,
-                    "total": len(spotify_tracks), "new": len(new_tracks), "removed": len(removed_ids),
-                })
-                self.progress.tracks_total += len(new_tracks)
-
-                states = {}
-                if new_tracks:
-                    def _progress_cb(msg):
-                        self.progress.message = msg
-
-                    self.progress.phase = "searching"
-                    states = soulseek.search_and_queue_all(new_tracks, on_progress=_progress_cb, local_dir=nicotine_download_dir)
-
-                    self.progress.phase = "downloading"
-                    soulseek.resolve_all(states, on_progress=_progress_cb)
-
-                if new_tracks or removed_ids:
-                    # Every download has resolved -- this is the first moment the
-                    # run writes to Rekordbox. The sync may have been going for
-                    # hours, so "was it closed when we started?" proves nothing;
-                    # wait here (don't write into an open database) if it's open now.
-                    self._wait_until_rekordbox_closed("tracks are ready to import")
-                    self.progress.phase = "importing"
-                    rb_playlist_id = rb.find_or_create_playlist(display_name)
-                    flac_state["rb_playlist_id"] = rb_playlist_id
-                    if not flac_state.get("created_at"):
-                        flac_state["created_at"] = datetime.now().isoformat()
-
-                if new_tracks:
-                    playlist_folder = Path(music_folder) / display_name
-                    playlist_folder.mkdir(parents=True, exist_ok=True)
-                    originals_dir = playlist_folder / "_originals"
-
-                    for track in new_tracks:
-                        st = states[track.spotify_id]
-                        if not st.downloaded:
-                            self.progress.tracks_failed += 1
-                            self.progress.errors.append(f"Soulseek: no source found for {track.artist} - {track.title}")
-                            continue
-
-                        src = soulseek.download_path_for(st, nicotine_download_dir)
-                        if not src:
-                            self.progress.tracks_failed += 1
-                            self.progress.errors.append(f"Soulseek: download finished but file not found for {track.artist} - {track.title}")
-                            continue
-
-                        dest = playlist_folder / src.name
-                        counter = 1
-                        while dest.exists() and dest != src:
-                            dest = playlist_folder / f"{src.stem}_{counter}{src.suffix}"
-                            counter += 1
-                        shutil.move(str(src), str(dest))
-                        self.progress.tracks_downloaded += 1
-
-                        # Lossy check on the file exactly as downloaded, BEFORE any
-                        # conversion (resampling would smear the band it inspects).
-                        # An .mp3 fallback is known-lossy, so there's nothing to flag.
-                        auth = {"suspect": False}
-                        if dest.suffix.lower() == ".flac":
-                            auth = soulseek.check_authenticity(dest)
-                        dest = soulseek.normalize_flac(dest, originals_dir)
-                        # Spotify's title/artist/album/year + cover, same as the MP3 path
-                        # gives -- Rekordbox reads its artwork and album from these tags.
-                        if not tagging.write_tags(dest, track):
-                            self.progress.errors.append(f"Could not write tags/cover for {track.artist} - {track.title} (file kept as downloaded)")
-                        if auth["suspect"]:
-                            msg = f"Suspect FLAC (likely transcoded from lossy source): {track.artist} - {track.title} -- {auth['reason']}"
-                            logger.warning(msg)
-                            self.progress.errors.append(msg)
-
-                        file_path = str(dest).replace("\\", "/")
-                        rb_result = rb.import_track_unanalyzed(file_path, track)
-                        content_id = rb_result.get("id")
-                        if content_id:
-                            rb.add_track_to_playlist(rb_playlist_id, content_id, track.position + 1)
-                            self.progress.tracks_imported += 1
-                            flac_state["tracks"][track.spotify_id] = {
-                                "filename": dest.name, "file_path": file_path,
-                                "artist": track.artist, "title": track.title,
-                            }
-
-                # Removals — remove from the FLAC playlist only, never delete files
-                for rid in removed_ids:
-                    info = flac_state["tracks"].get(rid, {})
-                    filename = info.get("filename", "")
-                    if filename:
-                        rb.remove_track_from_playlist(display_name, filename)
-                        self.progress.tracks_removed += 1
-                    flac_state["tracks"].pop(rid, None)
-
-                # Reorder every run, from scratch, against true Spotify order --
-                # this is what keeps a late-arriving track from desyncing everything.
-                if new_tracks or removed_ids:
-                    ordered_titles = [t.title for t in spotify_tracks]
-                    rb.reorder_playlist_by_titles(rb_playlist_id, ordered_titles)
-                    # Flush per playlist, right after its writes, rather than once
-                    # at the very end of a possibly hours-long run.
-                    rb.flush_wal()
-
-                if pl_id not in self._state["playlists"]:
-                    self._state["playlists"][pl_id] = pl_state
-                self._state["playlists"][pl_id]["snapshot_id"] = pl.get("snapshot_id", "")
-                # Persist after every playlist so a mid-run interruption can't lose
-                # what's already been imported.
-                self._save_state()
-
-            self.progress.status = "done"
-            self.progress.phase = "complete"
-            self.progress.message = (
-                f"FLAC sync complete: {self.progress.tracks_imported} imported, "
-                f"{self.progress.tracks_failed} failed, {self.progress.tracks_removed} removed from playlists"
-            )
-            logger.info("=== %s ===", self.progress.message)
-        finally:
-            self._save_state()
-
-        return self.get_progress()
+        from services.sync_soulseek import run_soulseek_sync
+        return run_soulseek_sync(self)

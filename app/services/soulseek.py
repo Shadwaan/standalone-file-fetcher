@@ -14,13 +14,13 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+from services import audio_formats
 from services.platform_paths import (
     DEFAULT_NICOTINE_EXE,
     NICOTINE_API_BASE_URL,
@@ -33,7 +33,7 @@ SEARCH_WAIT_SECONDS = 22
 POLL_SECONDS = 90
 STALL_POLLS = 3
 MAX_ATTEMPTS_PER_TRACK = 8
-FLAC_ATTEMPTS_BEFORE_MP3_FALLBACK = 4
+LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK = 4
 
 DEAD_STATUSES = {
     "File not shared.", "User logged off", "Banned (banana)",
@@ -266,11 +266,38 @@ def _build_query(artist_full: str, title_full: str) -> str:
     return f"{primary_artist} {title_main}".strip()
 
 
+def _ext(path: str) -> str:
+    m = re.search(r"\.([a-z0-9]{2,5})$", path.lower())
+    return "." + m.group(1) if m else ""
+
+
+# Which format we'd rather have, best first: FLAC, then WAV and AIFF as equals, then a
+# 320kbps MP3 only as the last resort. This outranks everything else in choosing a
+# source (a free upload slot only breaks ties WITHIN a tier).
+FORMAT_TIER = {".flac": 2, ".wav": 1, ".aif": 1, ".aiff": 1, ".mp3": 0}
+
+
+def _lossless_candidate(item: dict) -> tuple[int, int] | None:
+    """(format tier, evidence) for a lossless candidate, or None if it isn't one.
+    FLAC peers report a bit depth (attr 5), which we require. WAV/AIFF results are
+    rare and usually carry no attributes at all, so they're accepted on weaker
+    evidence (1 = the peer reports a bit depth or a PCM-sized bitrate, 0 = nothing)
+    and PROVEN after download instead -- see resolve_all's `validate`."""
+    ext = _ext(item.get("file_path") or "")
+    attrs = item.get("file_attributes") or {}
+    if ext == ".flac":
+        return (FORMAT_TIER[".flac"], 1) if attrs.get("5") is not None else None
+    if ext in (".wav", ".aif", ".aiff"):
+        evidence = 1 if (attrs.get("5") is not None or (attrs.get("0") or 0) >= 700) else 0
+        return FORMAT_TIER[ext], evidence
+    return None
+
+
 def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str]) -> tuple[dict | None, int]:
-    """One search attempt. mode: 'flac' or 'mp3'. Returns (best candidate or
-    None, number of raw results seen) -- the count is surfaced to callers so
-    "zero results" (live-network luck) can be told apart from "results came
-    back but none verified.\""""
+    """One search attempt. mode: 'lossless' (FLAC, WAV or AIFF) or 'mp3' (a genuine
+    320kbps fallback). Returns (best candidate or None, number of raw results seen)
+    -- the count lets callers tell "zero results" (live-network luck) apart from
+    "results came back but none verified"."""
     query = _build_query(artist_full, title_full)
     title_main = re.split(r"\s+-\s+", title_full, maxsplit=1)[0]
 
@@ -288,126 +315,103 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
         if not passes_version_guard(fp.lower(), title_full):
             continue
         attrs = it.get("file_attributes") or {}
-        if mode == "flac":
-            if not fp.lower().endswith(".flac") or attrs.get("5") is None:
+        if mode == "lossless":
+            ranked = _lossless_candidate(it)
+            if ranked is None:
                 continue
         else:
-            if not fp.lower().endswith(".mp3") or attrs.get("0") != 320:
+            if _ext(fp) != ".mp3" or attrs.get("0") != 320:
                 continue
-        cands.append(it)
+            ranked = (FORMAT_TIER[".mp3"], 0)
+        cands.append((it, ranked))
 
-    cands.sort(key=lambda i: (bool(i.get("free_upload_slots")), i.get("upload_speed") or 0, i.get("size") or 0), reverse=True)
-    return (cands[0] if cands else None), len(items)
-
-
-# ─── 16-bit FLAC conversion (archives originals, never deletes) ────────────
-
-
-DJ_SAMPLE_RATES = (44100, 48000)
+    # Format tier first (FLAC > WAV = AIFF > MP3), then within a tier: a free upload
+    # slot (no slot = it may never start), how much evidence the peer gives, speed, size.
+    cands.sort(key=lambda c: (c[1][0], bool(c[0].get("free_upload_slots")), c[1][1],
+                              c[0].get("upload_speed") or 0, c[0].get("size") or 0), reverse=True)
+    return (cands[0][0] if cands else None), len(items)
 
 
-def _target_sample_rate(rate: int | None) -> int:
-    """44.1k and 48k are kept as-is. Hi-res rates go to the nearest rate at an
-    exact integer ratio (88.2k/176.4k -> 44.1k, 96k/192k -> 48k), which resamples
-    cleanly; anything odd falls back to 44.1k."""
-    if rate in DJ_SAMPLE_RATES:
-        return rate
-    if rate in (88200, 176400):
-        return 44100
-    if rate in (96000, 192000):
-        return 48000
-    return 44100
+# ─── Authenticity check: catch lossy-source transcodes in lossless files ────
+# A file that's really an MP3 decoded and re-wrapped as FLAC/WAV/AIFF keeps the lossy
+# encoder's low-pass: the spectrum falls off a CLIFF at the encoder's cutoff and sits
+# flat at the noise floor above it (about 16 kHz for ~128 kbps, ~19 kHz for ~192 kbps).
+# A genuine recording rolls off gradually.
+#
+# Calibrated on real music: 34 genuine FLACs, plus 12 of them round-tripped through MP3
+# at 128/192/256/320 kbps. The drop between adjacent 1 kHz bands (16-20 kHz) never
+# exceeded 12.4 dB on a genuine file, while every 128, 192 and 256 kbps transcode
+# dropped 16.5 dB or more (usually 25-50). The 16 dB threshold sits in that gap: 0 of 34
+# genuine files flagged, 36 of 36 transcodes at <= 256 kbps caught.
+#
+# What it can NOT do: catch a 320 kbps transcode (0 of 12 caught). Those keep content to
+# ~20 kHz, indistinguishable from a genuine file's anti-alias filter. It's also a
+# heuristic -- a genuinely lossless file with an unusually hard low-pass would be
+# flagged -- so a flagged file is kept and reported, never rejected.
+#
+# (An earlier version measured energy above 20 kHz with ffmpeg's highpass filter. That
+# filter is far too gentle: loud content just below 20 kHz leaks straight through, so a
+# file deliberately low-passed at 16 kHz still measured -43 dB and passed.)
+
+SPECTRAL_CLIFF_DB = 16.0
+CLIFF_BOUNDARIES_KHZ = (16, 17, 18, 19)
+_FFT_SIZE = 8192
+_MIN_RATE_TO_CHECK = 40000
 
 
-def _probe(path: Path) -> tuple[str | None, int | None, int | None]:
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "a:0",
-         "-show_entries", "stream=codec_name,bits_per_raw_sample,sample_rate",
-         "-of", "default=noprint_wrappers=1", str(path)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
-    codec, bits, rate = None, None, None
-    for line in out.stdout.splitlines():
-        key, _, v = line.partition("=")
-        if key == "codec_name":
-            codec = v
-        elif key == "bits_per_raw_sample":
-            bits = int(v) if v.isdigit() else None
-        elif key == "sample_rate":
-            rate = int(v) if v.isdigit() else None
-    return codec, bits, rate
+def _band_levels(path: Path, rate: int) -> dict[int, float] | None:
+    """Average level (dB) of each 1 kHz band from 15 to 20 kHz, over the loud half
+    of the track. None if the file is too short to measure."""
+    import numpy as np
 
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0", "-ac", "1", "-t", "900", "-f", "f32le", "-"],
+        capture_output=True, timeout=180)
+    x = np.frombuffer(r.stdout, dtype=np.float32)
+    n = _FFT_SIZE
+    if len(x) < n * 4:
+        return None
 
-def normalize_flac(path: Path, originals_dir: Path) -> Path:
-    """Return a path guaranteed to be 16-bit FLAC at 44.1 or 48 kHz -- what CDJs
-    and most standalone players actually play -- converting (and archiving the
-    original, never deleting it) if it isn't already. Run the lossy-source check
-    on the ORIGINAL first, not on this output.
-    A 320kbps MP3 converted this way sounds identical to the MP3 (nothing is
-    gained by wrapping it in FLAC); this is only for format uniformity."""
-    codec, bits, rate = _probe(path)
-    if codec == "flac" and bits == 16 and rate in DJ_SAMPLE_RATES:
-        return path
+    starts = np.arange(0, len(x) - n, n)
+    if len(starts) > 400:
+        starts = starts[np.linspace(0, len(starts) - 1, 400).astype(int)]
+    win = np.hanning(n)
+    spectra = np.abs(np.fft.rfft(np.stack([x[s:s + n] * win for s in starts]), axis=1)) ** 2
+    freqs = np.fft.rfftfreq(n, 1 / rate)
 
-    originals_dir.mkdir(exist_ok=True)
-    new_path = path.with_suffix(".flac") if path.suffix.lower() != ".flac" else path
-    tmp_path = new_path.parent / (new_path.name + ".converting.flac")
-    target = _target_sample_rate(rate)
-
-    # soxr resampling + triangular dither: dropping 24-bit to 16-bit without dither
-    # adds audible quantization distortion on quiet passages.
-    cmd = ["ffmpeg", "-y", "-i", str(path), "-map", "0:a:0",
-           "-af", f"aresample=resampler=soxr:osf=s16:osr={target}:dither_method=triangular",
-           "-c:a", "flac", "-f", "flac", str(tmp_path)]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if result.returncode != 0:
-        logger.warning("Conversion failed for %s, keeping as-is: %s", path.name, result.stderr[-300:])
-        return path
-
-    archived = originals_dir / path.name
-    shutil.move(str(path), str(archived))
-    shutil.move(str(tmp_path), str(new_path))
-    logger.info("Converted %s -> 16-bit/%dHz FLAC (original archived to _originals/%s)", new_path.name, target, path.name)
-    return new_path
-
-
-# ─── Authenticity check: catch lossy-source transcodes wrapped in FLAC ──────
-# A file that's really an MP3 decoded and re-encoded as FLAC is technically
-# lossless FROM THAT POINT ON, but the original lossy encoder already threw
-# away everything above its cutoff frequency (~16-20.5kHz depending on
-# bitrate) -- that shows up as a hard, unnaturally clean wall of silence
-# there. A genuine CD-sourced FLAC has real (if quiet) content out toward the
-# ~22kHz Nyquist limit. This is a heuristic, not proof -- some real masters
-# (certain vinyl rips, heavily limited masters) roll off early too -- so a
-# flagged file is kept, just surfaced as "suspect" rather than silently trusted.
-
-HIGH_FREQ_CUTOFF_HZ = 20000
-HIGH_FREQ_SILENCE_THRESHOLD_DB = -75.0
+    # Skip silence and quiet intros: judge the spectrum on the loud half of the windows.
+    mid_energy = spectra[:, (freqs >= 1000) & (freqs <= 5000)].sum(axis=1)
+    mean_db = 10 * np.log10(spectra[mid_energy >= np.median(mid_energy)].mean(axis=0) + 1e-20)
+    return {k: float(mean_db[(freqs >= k * 1000) & (freqs < (k + 1) * 1000)].mean()) for k in range(15, 20)}
 
 
 def check_authenticity(path: Path) -> dict:
-    """Returns {"suspect": bool, "max_db": float | None, "reason": str}."""
+    """Returns {"suspect": bool, "cliff_khz": int | None, "drop_db": float | None, "reason": str}."""
+    def result(suspect, reason, cliff=None, drop=None):
+        return {"suspect": suspect, "cliff_khz": cliff, "drop_db": drop, "reason": reason}
+
+    _, _, rate = audio_formats.probe(path)
+    if not rate or rate < _MIN_RATE_TO_CHECK:
+        return result(False, "sample rate too low to check")
     try:
-        out = subprocess.run(
-            ["ffmpeg", "-i", str(path), "-af", f"highpass=f={HIGH_FREQ_CUTOFF_HZ},volumedetect",
-             "-vn", "-sn", "-f", "null", "-"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
-        )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return {"suspect": False, "max_db": None, "reason": f"authenticity check failed to run: {e}"}
+        levels = _band_levels(path, rate)
+    except (subprocess.TimeoutExpired, OSError, ValueError) as e:
+        return result(False, f"authenticity check failed to run: {e}")
+    if levels is None:
+        return result(False, "too short to measure")
 
-    m = re.search(r"max_volume:\s*(-?\d+\.?\d*)\s*dB", out.stderr)
-    if not m:
-        return {"suspect": False, "max_db": None, "reason": "could not measure high-frequency content"}
+    # drop across each boundary: the band just below it minus the band just above
+    drops = {b: levels[b - 1] - levels[b] for b in CLIFF_BOUNDARIES_KHZ}
+    cliff, drop = max(drops.items(), key=lambda kv: kv[1])
+    if drop < SPECTRAL_CLIFF_DB:
+        return result(False, "spectrum rolls off gradually, no lossy cutoff found", cliff, round(drop, 1))
 
-    max_db = float(m.group(1))
-    if max_db < HIGH_FREQ_SILENCE_THRESHOLD_DB:
-        return {
-            "suspect": True, "max_db": max_db,
-            "reason": f"near-total silence above {HIGH_FREQ_CUTOFF_HZ / 1000:.0f}kHz (max {max_db}dB) -- "
-                      f"consistent with a lossy source transcoded into FLAC, not genuinely lossless",
-        }
-    return {"suspect": False, "max_db": max_db, "reason": "has real high-frequency content"}
+    rough = "128 kbps or lower" if cliff <= 17 else "192-256 kbps"
+    return result(
+        True,
+        f"hard cutoff near {cliff} kHz (a {drop:.0f} dB cliff) -- the signature of an MP3 at roughly {rough} "
+        f"re-encoded as lossless, not a genuinely lossless source",
+        cliff, round(drop, 1))
 
 
 # ─── Batch search-then-watch pipeline ───────────────────────────────────────
@@ -420,7 +424,7 @@ class _TrackState:
     def __init__(self, track):
         self.track = track
         self.key = None          # (username, file_path) currently queued
-        self.mode = "flac"
+        self.mode = "lossless"   # falls back to "mp3" after repeated failures
         self.history = []        # recent progress_pct readings, for stall detection
         self.tried_users = set()
         self.attempts = 0
@@ -429,19 +433,20 @@ class _TrackState:
         self.local_path = None   # set when the file was already on disk
 
 
-def _scan_local_flacs(download_dir: str | None) -> list[Path]:
-    """FLACs already sitting (top level only) in Nicotine+'s download folder --
-    e.g. from an earlier sync that was interrupted before it could import them."""
+def _scan_local_lossless(download_dir: str | None) -> list[Path]:
+    """Lossless files already sitting (top level only) in Nicotine+'s download
+    folder -- e.g. from an earlier sync that was interrupted before importing them."""
     if not download_dir:
         return []
     try:
-        return [p for p in Path(download_dir).glob("*.flac") if p.is_file()]
+        return [p for p in Path(download_dir).iterdir()
+                if p.is_file() and p.suffix.lower() in audio_formats.LOSSLESS_EXTS]
     except OSError:
         return []
 
 
-def _live_flac_downloads() -> list[dict]:
-    """Downloads Nicotine+ has already queued or is mid-transfer on."""
+def _live_lossless_downloads() -> list[dict]:
+    """Lossless downloads Nicotine+ has already queued or is mid-transfer on."""
     try:
         items = get_downloads(active_only=False)
     except Exception:
@@ -450,7 +455,7 @@ def _live_flac_downloads() -> list[dict]:
     out = []
     for d in items:
         path = d.get("virtual_path") or d.get("file_path") or ""
-        if d.get("status") in live and path.lower().endswith(".flac"):
+        if d.get("status") in live and _ext(path) in audio_formats.LOSSLESS_EXTS:
             out.append(d)
     return out
 
@@ -460,11 +465,16 @@ def _title_matches(path: str, track) -> bool:
     return is_exact_title_match(path, track.artist, title_main) and passes_version_guard(path.lower(), track.title)
 
 
-def _match_local(track, local_files: list[Path], claimed: set) -> Path | None:
-    hits = [p for p in local_files if p not in claimed and _title_matches(p.name, track)]
+def _match_local(track, local_files: list[Path], claimed: set, prefer_exts: set) -> Path | None:
+    hits = [p for p in local_files
+            if p not in claimed and _title_matches(p.name, track) and audio_formats.is_valid_lossless(p)]
     if not hits:
         return None
-    best = max(hits, key=lambda p: p.stat().st_size)   # larger = higher-quality encode
+    # Same hierarchy as a fresh search: FLAC, then WAV/AIFF. Within a tier, prefer a
+    # file already in a wanted container (needs no conversion), then the larger one
+    # (size only means something between two files of the SAME format).
+    best = max(hits, key=lambda p: (FORMAT_TIER.get(p.suffix.lower(), 0), p.suffix.lower() in prefer_exts,
+                                    p.stat().st_size))
     claimed.add(best)
     return best
 
@@ -479,16 +489,19 @@ def _match_live(track, live: list[dict], claimed: set) -> dict | None:
     return None
 
 
-def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None = None) -> dict[str, _TrackState]:
+def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None = None,
+                         prefer_exts: set | None = None) -> dict[str, _TrackState]:
     """First pass. For each track, reuse what Soulseek/Nicotine+ already gave us
     before spending a search on it:
-      1. a matching FLAC already in the download folder -> done, no search
+      1. a matching lossless file already in the download folder -> done, no search
       2. a matching download Nicotine+ already has queued/in flight -> adopt it
          (the watchdog monitors it and replaces it if it stalls)
       3. otherwise search and queue a verified match.
+    `prefer_exts` (e.g. {".flac", ".aiff"}) breaks ties toward a wanted container.
     Returns the per-track state the watchdog then polls."""
-    local_files = _scan_local_flacs(local_dir)
-    live = _live_flac_downloads()
+    prefer_exts = prefer_exts or set()
+    local_files = _scan_local_lossless(local_dir)
+    live = _live_lossless_downloads()
     claimed_local: set = set()
     claimed_live: set = set()
 
@@ -498,7 +511,7 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
         states[track.spotify_id] = st
         label = f"{track.artist} - {track.title}"
 
-        local = _match_local(track, local_files, claimed_local)
+        local = _match_local(track, local_files, claimed_local, prefer_exts)
         if local:
             st.local_path = local
             st.downloaded = True
@@ -516,18 +529,34 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
 
         if on_progress:
             on_progress(f"Searching Soulseek ({i + 1}/{len(tracks)}): {label}")
-        best, _ = find_candidate(track.artist, track.title, "flac", set())
+        best, _ = find_candidate(track.artist, track.title, "lossless", set())
         if best:
             enqueue(best)
             st.key = (best["username"], best["file_path"])
     return states
 
 
-def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_seconds: float = 6 * 3600) -> None:
-    """Poll until every track is downloaded or given up: replaces stalled or
-    dead sources with a freshly verified alternative (excluding every
-    uploader already tried), falling back to a 320kbps MP3 only after several
-    failed FLAC attempts. Mutates `states` in place."""
+def _saved_file(file_path: str, download_dir: str) -> Path | None:
+    """Where Nicotine+ actually saved a download (it keeps only the filename, and
+    silently strips leading whitespace from it)."""
+    name = re.split(r"[\\/]", file_path)[-1]
+    for candidate in (name, name.strip()):
+        p = Path(download_dir) / candidate
+        if p.exists():
+            return p
+    return None
+
+
+def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_seconds: float = 6 * 3600,
+                download_dir: str | None = None, validate=None) -> None:
+    """Poll until every track is downloaded or given up: replaces stalled, dead or
+    unusable sources with a freshly verified alternative (excluding every uploader
+    already tried), falling back to a 320kbps MP3 only after several failed
+    lossless attempts. Mutates `states` in place.
+
+    `validate(path) -> bool` (with `download_dir`) is the "is this finished file
+    actually usable" gate: a WAV that turns out to be compressed, or not audio at
+    all, is treated like a dead source instead of being handed on."""
     start = time.time()
 
     while True:
@@ -547,22 +576,30 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                 status = d.get("status") if d else "NOT FOUND"
                 pct = d.get("progress_pct", 0) if d else 0
 
+            needs_replacement = False
             if status == "Finished":
-                st.downloaded = True
-                st.resolved = True
+                usable = True
+                if validate and download_dir:
+                    f = _saved_file(st.key[1], download_dir)
+                    usable = bool(f) and validate(f)
+                if usable:
+                    st.downloaded = True
+                    st.resolved = True
+                    if on_progress:
+                        on_progress(f"Downloaded: {st.track.artist} - {st.track.title}")
+                    continue
                 if on_progress:
-                    on_progress(f"Downloaded: {st.track.artist} - {st.track.title}")
-                continue
-
-            needs_replacement = st.key is None
-            if not needs_replacement:
-                if status in DEAD_STATUSES or status == "NOT FOUND":
+                    on_progress(f"Unusable download, trying another source: {st.track.artist} - {st.track.title}")
+                needs_replacement = True
+            elif st.key is None:
+                needs_replacement = True
+            elif status in DEAD_STATUSES or status == "NOT FOUND":
+                needs_replacement = True
+            else:
+                st.history.append(pct)
+                st.history = st.history[-STALL_POLLS:]
+                if len(st.history) == STALL_POLLS and len(set(st.history)) == 1:
                     needs_replacement = True
-                else:
-                    st.history.append(pct)
-                    st.history = st.history[-STALL_POLLS:]
-                    if len(st.history) == STALL_POLLS and len(set(st.history)) == 1:
-                        needs_replacement = True
 
             if not needs_replacement:
                 continue
@@ -577,7 +614,7 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                 continue
 
             mode = st.mode
-            if mode == "flac" and st.attempts > FLAC_ATTEMPTS_BEFORE_MP3_FALLBACK:
+            if mode == "lossless" and st.attempts > LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK:
                 mode = "mp3"
 
             best, _ = find_candidate(st.track.artist, st.track.title, mode, st.tried_users)
@@ -605,17 +642,10 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
 
 
 def download_path_for(state: _TrackState, nicotine_download_dir: str) -> Path | None:
-    """The local file Nicotine+ actually saved a resolved track's download to."""
+    """The local file for a resolved track: one that was already on disk, or the
+    file Nicotine+ saved for its download."""
     if state.local_path and Path(state.local_path).exists():
         return Path(state.local_path)
     if not state.downloaded or not state.key:
         return None
-    _, file_path = state.key
-    local = Path(nicotine_download_dir) / Path(file_path).name
-    if local.exists():
-        return local
-    # Nicotine+ silently strips leading whitespace from saved filenames
-    stripped = Path(nicotine_download_dir) / Path(file_path).name.strip()
-    if stripped.exists():
-        return stripped
-    return None
+    return _saved_file(state.key[1], nicotine_download_dir)

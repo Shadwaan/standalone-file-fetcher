@@ -26,7 +26,8 @@ _DEFAULTS = {
     "music_folder": None,        # null = unconfigured; UI shows first-run prompt
     "first_run_complete": False,
     "sync_to_traktor": False,    # also write to Traktor's collection.nml on each sync
-    "download_source": "youtube",  # "youtube" (yt-dlp, MP3) or "soulseek" (Nicotine+, FLAC)
+    "download_source": "youtube",  # "youtube" (yt-dlp, MP3) or "soulseek" (Nicotine+, lossless)
+    "output_formats": ["flac"],    # Soulseek only: any of "flac", "aiff", "wav" -- one playlist each
 }
 
 
@@ -130,3 +131,30 @@ def set_download_source(source: str) -> dict:
     save(cfg)
     logger.info("download_source set to %s", source)
     return cfg
+
+
+def get_output_formats() -> list[str]:
+    """The lossless formats a Soulseek sync produces (each gets its own playlist).
+    Always a non-empty list in canonical order; falls back to FLAC."""
+    from services.audio_formats import FORMAT_ORDER
+    chosen = load().get("output_formats") or []
+    valid = [f for f in FORMAT_ORDER if f in chosen]
+    return valid or ["flac"]
+
+
+def set_output_formats(formats: list[str]) -> dict:
+    """Set the output formats. Rejects unknown names and an empty selection --
+    a Soulseek sync with nothing to produce makes no sense. Returns the config."""
+    from services.audio_formats import FORMAT_ORDER
+    formats = list(formats or [])
+    unknown = [f for f in formats if f not in FORMAT_ORDER]
+    if unknown:
+        raise ValueError(f"unknown output format(s): {unknown}; choose from {FORMAT_ORDER}")
+    if not formats:
+        raise ValueError("choose at least one output format")
+    cfg = load()
+    cfg["output_formats"] = [f for f in FORMAT_ORDER if f in formats]
+    save(cfg)
+    logger.info("output_formats set to %s", cfg["output_formats"])
+    return cfg
+
