@@ -308,6 +308,27 @@ def _get_or_create_album(db, tables, name: str, artist_id: str | None = None) ->
         return None
 
 
+_FILE_TYPES = {".mp3": 1, ".m4a": 4, ".flac": 5, ".wav": 11, ".aiff": 12, ".aif": 12}
+
+
+def _audio_properties(file_path: str) -> tuple[int, int, int]:
+    """(Rekordbox FileType, bitrate in kbps, sample rate) read from the file
+    itself. These used to be hard-coded (MP3 / 320kbps / 44.1kHz): a wrong sample
+    rate made Rekordbox's batch analysis hang on 48kHz yt-dlp output, and a wrong
+    FileType mislabels FLAC/AIFF/WAV imports as MP3."""
+    file_type = _FILE_TYPES.get(Path(file_path).suffix.lower(), 1)
+    sample_rate, bitrate = 44100, 320
+    try:
+        import mutagen
+        info = mutagen.File(file_path).info
+        sample_rate = int(info.sample_rate) or sample_rate
+        if getattr(info, "bitrate", None):
+            bitrate = int(info.bitrate) // 1000  # mutagen returns bps
+    except Exception:
+        pass
+    return file_type, bitrate, sample_rate
+
+
 def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
     """Import a track into Rekordbox DB WITHOUT analysis. Rekordbox will analyze it on open."""
     try:
@@ -333,18 +354,7 @@ def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
         import uuid as _uuid
         today = datetime.now().strftime('%Y-%m-%d')
 
-        # Read actual SampleRate from MP3 file — yt-dlp output is 48000 Hz
-        # Hardcoding 44100 caused Rekordbox analysis hangs because of mismatch
-        actual_sr = 44100
-        actual_bitrate = 320
-        try:
-            from mutagen.mp3 import MP3
-            audio = MP3(file_path)
-            actual_sr = audio.info.sample_rate
-            if audio.info.bitrate:
-                actual_bitrate = audio.info.bitrate // 1000  # mutagen returns bps
-        except Exception:
-            pass
+        file_type, actual_bitrate, actual_sr = _audio_properties(file_path)
 
         content = tables.DjmdContent()
         content.ID = new_id
@@ -353,7 +363,7 @@ def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
         content.Title = track.title
         content.FileNameL = Path(file_path).name
         content.FileSize = Path(file_path).stat().st_size if Path(file_path).exists() else 0
-        content.FileType = 1      # MP3
+        content.FileType = file_type
         content.BitRate = actual_bitrate
         content.SampleRate = actual_sr
         content.Analysed = 0      # NOT analyzed — Rekordbox will do it
