@@ -608,7 +608,7 @@ class SyncOrchestrator:
         if self._refuse_if_rekordbox_running():
             return self.get_progress()
 
-        from services import soulseek
+        from services import soulseek, tagging
         from services.spotify import SpotifyService
         from services import rekordbox as rb
 
@@ -764,6 +764,10 @@ class SyncOrchestrator:
                         if dest.suffix.lower() == ".flac":
                             auth = soulseek.check_authenticity(dest)
                         dest = soulseek.normalize_flac(dest, originals_dir)
+                        # Spotify's title/artist/album/year + cover, same as the MP3 path
+                        # gives -- Rekordbox reads its artwork and album from these tags.
+                        if not tagging.write_tags(dest, track):
+                            self.progress.errors.append(f"Could not write tags/cover for {track.artist} - {track.title} (file kept as downloaded)")
                         if auth["suspect"]:
                             msg = f"Suspect FLAC (likely transcoded from lossy source): {track.artist} - {track.title} -- {auth['reason']}"
                             logger.warning(msg)
