@@ -6,6 +6,7 @@ Nothing here touches a real Rekordbox library, Soulseek, or your sync_state.json
 Needs ffmpeg/ffprobe on PATH.   Run:   python -m unittest discover -s tests -v
 """
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -443,6 +444,58 @@ class MatcherTest(unittest.TestCase):
         with mock.patch.object(soulseek, "_api_post", nico.api_post),              mock.patch.object(soulseek, "_fetch_all_results", nico.fetch_all_results),              mock.patch.object(soulseek, "SEARCH_WAIT_SECONDS", 0):
             best, _ = soulseek.find_candidate("Modjo", "Rollercoaster", "lossless", set())
         self.assertEqual(best["username"], "u1")
+
+
+class FilenameConventionTest(unittest.TestCase):
+    """The matcher must accept the SAME song however people name the file. This is the
+    net that would have caught 'Can We Still Be Friends' by 'Barry Can't Swim' (a title
+    sharing a word with the artist) before it silently failed in a real sync."""
+
+    PAIRS = [
+        ("Bicep", "Satisfy"),
+        ("Barry Can't Swim, Laurence Guy", "Can We Still Be Friends?"),
+        ("Four Tet, KH, Nelly Furtado", "Only Human"),
+        ("Fatima Yamaha", "What's a Girl to Do"),
+        ("Ross from Friends", "Epiphany"),
+        ("Prince Fatty, Little Roy", "Roof Over My Dub"),
+        ("Scientist, Hempress Sativa", "Rock It Ina Dub"),
+        ("Modjo", "Rollercoaster"),
+        ("Overmono", "Is U"),
+        ("Mount Kimbi", "No Need 2 Be Sorry, Call Me?"),
+        ("Dense & Pika", "Colt"),
+        ("Four Tet", "Four Tet Loves You"),          # title contains the whole artist name
+        ("Soul Wun", "Blue Light"),
+    ]
+
+    @staticmethod
+    def conventions(artist, title):
+        first = artist.split(",")[0].strip()
+        safe = lambda x: re.sub(r'[?:*"<>|/]', "_", x)
+        snake = lambda x: re.sub(r"[^a-z0-9()]+", "_", x.lower().replace("'", "").replace("\u2019", "")).strip("_")
+        yield f"{first} - {title}.flac"
+        yield f"{safe(first)} - {safe(title)}.flac"
+        yield f"01 - {safe(title)}.flac"
+        yield f"01. {first} - {safe(title)}.wav"
+        yield f"07 {safe(title)} (Original Mix).aiff"
+        yield f"{first} - {safe(title)} (Original Mix).flac"
+        yield f"01-{snake(first)}-{snake(title)}_(original_mix).flac"
+        yield f"{first.replace(chr(39), chr(0x2019))} - {safe(title)}.wav"
+        yield f"D1 A2 {safe(title)} ({first}).flac"
+
+    def test_every_naming_convention_matches_its_own_song(self):
+        misses = []
+        for artist, title in self.PAIRS:
+            for name in self.conventions(artist, title):
+                if not soulseek.is_exact_title_match("share\\" + name, artist, title):
+                    misses.append(f"{artist} - {title}: {name}")
+        self.assertEqual(misses, [], "filenames of the right song that the matcher rejected")
+
+    def test_a_different_song_by_the_same_artist_never_matches(self):
+        for artist, title in self.PAIRS:
+            first = artist.split(",")[0].strip()
+            for other in ("Some Other Song", "Totally Different"):
+                self.assertFalse(soulseek.is_exact_title_match(f"share\{first} - {other}.flac", artist, title),
+                                 f"{artist} - {other} matched {title}")
 
 
 if __name__ == "__main__":

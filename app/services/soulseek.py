@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 from services import audio_formats
 from services.platform_paths import (
@@ -176,6 +177,7 @@ _SAFE_PHRASES = ["original mix", "original version", "album version"]
 def _clean_words(text: str, extra_strip_words=()) -> list[str]:
     text = _PARENS_RE.sub(" ", text)
     text = _FEAT_RE.sub("", text)
+    text = re.sub(r"(?<=\w)['’](?=\w)", "", text)     # what's / whats / what’s are one word
     text = _PUNCT_RE.sub(" ", text.lower())
     strip_set = _QUALIFIER_WORDS | _CONNECTOR_WORDS | {w.lower() for w in extra_strip_words}
     return [w for w in text.split() if w not in strip_set and len(w) > 1 and not w.isdigit()]
@@ -330,11 +332,17 @@ def _has_title_match(items: list[dict], artist_full: str, title_main: str, title
                and passes_version_guard((i.get("file_path") or "").lower(), title_full) for i in items)
 
 
-def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str]) -> tuple[dict | None, int]:
+class SearchStats(NamedTuple):
+    raw: int        # results the network returned
+    matched: int    # ...of which are this exact title (right song, right version)
+
+
+def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str]) -> tuple[dict | None, SearchStats]:
     """One search attempt. mode: 'lossless' (FLAC, WAV or AIFF) or 'mp3' (a genuine
-    320kbps fallback). Returns (best candidate or None, number of raw results seen)
-    -- the count lets callers tell "zero results" (live-network luck) apart from
-    "results came back but none verified"."""
+    320kbps fallback). Returns (best candidate or None, SearchStats). The stats tell
+    apart the three ways a search comes up empty: the network returned nothing (bad
+    luck), it returned results but none was this song (usually our matching is too
+    strict), or right-song files exist but none is usable (wrong format, dead peers)."""
     query = _build_query(artist_full, title_full)
     title_main = re.split(r"\s+-\s+", title_full, maxsplit=1)[0]
 
@@ -345,13 +353,15 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
         items = items + _search(fallback)
 
     cands = []
+    matched = 0
     for it in items:
         fp = it.get("file_path") or ""
-        if it.get("username") in exclude_users:
-            continue
         if not is_exact_title_match(fp, artist_full, title_main):
             continue
         if not passes_version_guard(fp.lower(), title_full):
+            continue
+        matched += 1
+        if it.get("username") in exclude_users:
             continue
         attrs = it.get("file_attributes") or {}
         if mode == "lossless":
@@ -368,7 +378,7 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
     # slot (no slot = it may never start), how much evidence the peer gives, speed, size.
     cands.sort(key=lambda c: (c[1][0], bool(c[0].get("free_upload_slots")), c[1][1],
                               c[0].get("upload_speed") or 0, c[0].get("size") or 0), reverse=True)
-    return (cands[0][0] if cands else None), len(items)
+    return (cands[0][0] if cands else None), SearchStats(len(items), matched)
 
 
 # ─── Authenticity check: catch lossy-source transcodes in lossless files ────
@@ -458,7 +468,8 @@ def check_authenticity(path: Path) -> dict:
 
 
 class _TrackState:
-    __slots__ = ("track", "key", "mode", "history", "tried_users", "attempts", "resolved", "downloaded", "local_path")
+    __slots__ = ("track", "key", "mode", "history", "tried_users", "attempts", "resolved", "downloaded", "local_path",
+                 "max_raw", "max_matched")
 
     def __init__(self, track):
         self.track = track
@@ -470,6 +481,19 @@ class _TrackState:
         self.resolved = False
         self.downloaded = False
         self.local_path = None   # set when the file was already on disk
+        self.max_raw = 0         # best search so far: results returned / results that were this song
+        self.max_matched = 0
+
+    def note_search(self, stats: SearchStats) -> None:
+        self.max_raw = max(self.max_raw, stats.raw)
+        self.max_matched = max(self.max_matched, stats.matched)
+
+    def why_no_source(self) -> str:
+        if self.max_raw == 0:
+            return "the network returned no results for it"
+        if self.max_matched == 0:
+            return f"{self.max_raw} results came back but none matched this title"
+        return f"{self.max_matched} matching files were found but none was usable"
 
 
 def _scan_local_lossless(download_dir: str | None) -> list[Path]:
@@ -568,7 +592,8 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
 
         if on_progress:
             on_progress(f"Searching Soulseek ({i + 1}/{len(tracks)}): {label}")
-        best, _ = find_candidate(track.artist, track.title, "lossless", set())
+        best, stats = find_candidate(track.artist, track.title, "lossless", set())
+        st.note_search(stats)
         if best:
             enqueue(best)
             st.key = (best["username"], best["file_path"])
@@ -649,14 +674,15 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
             if st.attempts > MAX_ATTEMPTS_PER_TRACK:
                 st.resolved = True
                 if on_progress:
-                    on_progress(f"Gave up (no source found): {st.track.artist} - {st.track.title}")
+                    on_progress(f"Gave up: {st.track.artist} - {st.track.title} ({st.why_no_source()})")
                 continue
 
             mode = st.mode
             if mode == "lossless" and st.attempts > LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK:
                 mode = "mp3"
 
-            best, _ = find_candidate(st.track.artist, st.track.title, mode, st.tried_users)
+            best, stats = find_candidate(st.track.artist, st.track.title, mode, st.tried_users)
+            st.note_search(stats)
             if not best:
                 st.mode = mode
                 continue

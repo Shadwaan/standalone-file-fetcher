@@ -234,7 +234,7 @@ def _produce_files(orch, needed, track_by_id, variants, pl_state, music_folder, 
             src = soulseek.download_path_for(st, nicotine_dir) if st and st.downloaded else None
             if not src:
                 progress.tracks_failed += len(fmts)
-                progress.errors.append(f"Soulseek: no source found for {label}")
+                progress.errors.append(f"Soulseek: no source found for {label} -- {st.why_no_source() if st else 'never searched'}")
                 continue
             progress.tracks_downloaded += 1
             if src.suffix.lower() in audio_formats.LOSSLESS_EXTS:
