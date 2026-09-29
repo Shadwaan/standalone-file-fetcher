@@ -303,47 +303,71 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
 # ─── 16-bit FLAC conversion (archives originals, never deletes) ────────────
 
 
-def _probe(path: Path) -> tuple[str | None, int | None]:
+DJ_SAMPLE_RATES = (44100, 48000)
+
+
+def _target_sample_rate(rate: int | None) -> int:
+    """44.1k and 48k are kept as-is. Hi-res rates go to the nearest rate at an
+    exact integer ratio (88.2k/176.4k -> 44.1k, 96k/192k -> 48k), which resamples
+    cleanly; anything odd falls back to 44.1k."""
+    if rate in DJ_SAMPLE_RATES:
+        return rate
+    if rate in (88200, 176400):
+        return 44100
+    if rate in (96000, 192000):
+        return 48000
+    return 44100
+
+
+def _probe(path: Path) -> tuple[str | None, int | None, int | None]:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "a:0",
-         "-show_entries", "stream=codec_name,bits_per_raw_sample",
+         "-show_entries", "stream=codec_name,bits_per_raw_sample,sample_rate",
          "-of", "default=noprint_wrappers=1", str(path)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
-    codec, bits = None, None
+    codec, bits, rate = None, None, None
     for line in out.stdout.splitlines():
-        if line.startswith("codec_name="):
-            codec = line.split("=", 1)[1]
-        elif line.startswith("bits_per_raw_sample="):
-            v = line.split("=", 1)[1]
+        key, _, v = line.partition("=")
+        if key == "codec_name":
+            codec = v
+        elif key == "bits_per_raw_sample":
             bits = int(v) if v.isdigit() else None
-    return codec, bits
+        elif key == "sample_rate":
+            rate = int(v) if v.isdigit() else None
+    return codec, bits, rate
 
 
-def ensure_16bit_flac(path: Path, originals_dir: Path) -> Path:
-    """Return a path guaranteed to be real 16-bit/44.1kHz FLAC, converting
-    (and archiving the original -- never deleting it) if it isn't already.
-    A 320kbps MP3 converted this way sounds identical to the MP3 (no quality
-    is gained by wrapping it in FLAC) -- this is purely for format uniformity."""
-    codec, bits = _probe(path)
-    if codec == "flac" and bits == 16:
+def normalize_flac(path: Path, originals_dir: Path) -> Path:
+    """Return a path guaranteed to be 16-bit FLAC at 44.1 or 48 kHz -- what CDJs
+    and most standalone players actually play -- converting (and archiving the
+    original, never deleting it) if it isn't already. Run the lossy-source check
+    on the ORIGINAL first, not on this output.
+    A 320kbps MP3 converted this way sounds identical to the MP3 (nothing is
+    gained by wrapping it in FLAC); this is only for format uniformity."""
+    codec, bits, rate = _probe(path)
+    if codec == "flac" and bits == 16 and rate in DJ_SAMPLE_RATES:
         return path
 
     originals_dir.mkdir(exist_ok=True)
     new_path = path.with_suffix(".flac") if path.suffix.lower() != ".flac" else path
     tmp_path = new_path.parent / (new_path.name + ".converting.flac")
+    target = _target_sample_rate(rate)
 
+    # soxr resampling + triangular dither: dropping 24-bit to 16-bit without dither
+    # adds audible quantization distortion on quiet passages.
     cmd = ["ffmpeg", "-y", "-i", str(path), "-map", "0:a:0",
-           "-sample_fmt", "s16", "-ar", "44100", "-c:a", "flac", "-f", "flac", str(tmp_path)]
+           "-af", f"aresample=resampler=soxr:osf=s16:osr={target}:dither_method=triangular",
+           "-c:a", "flac", "-f", "flac", str(tmp_path)]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
-        logger.warning("16-bit conversion failed for %s, keeping as-is: %s", path.name, result.stderr[-300:])
+        logger.warning("Conversion failed for %s, keeping as-is: %s", path.name, result.stderr[-300:])
         return path
 
     archived = originals_dir / path.name
     shutil.move(str(path), str(archived))
     shutil.move(str(tmp_path), str(new_path))
-    logger.info("Converted %s -> 16-bit FLAC (original archived to _originals/%s)", new_path.name, path.name)
+    logger.info("Converted %s -> 16-bit/%dHz FLAC (original archived to _originals/%s)", new_path.name, target, path.name)
     return new_path
 
 
@@ -391,7 +415,7 @@ def check_authenticity(path: Path) -> dict:
 
 
 class _TrackState:
-    __slots__ = ("track", "key", "mode", "history", "tried_users", "attempts", "resolved", "downloaded")
+    __slots__ = ("track", "key", "mode", "history", "tried_users", "attempts", "resolved", "downloaded", "local_path")
 
     def __init__(self, track):
         self.track = track
@@ -402,21 +426,100 @@ class _TrackState:
         self.attempts = 0
         self.resolved = False
         self.downloaded = False
+        self.local_path = None   # set when the file was already on disk
 
 
-def search_and_queue_all(tracks: list, on_progress=None) -> dict[str, _TrackState]:
-    """First pass: fire one search per track and queue whatever verified match
-    (if any) turns up. Returns the per-track state the watchdog then polls."""
+def _scan_local_flacs(download_dir: str | None) -> list[Path]:
+    """FLACs already sitting (top level only) in Nicotine+'s download folder --
+    e.g. from an earlier sync that was interrupted before it could import them."""
+    if not download_dir:
+        return []
+    try:
+        return [p for p in Path(download_dir).glob("*.flac") if p.is_file()]
+    except OSError:
+        return []
+
+
+def _live_flac_downloads() -> list[dict]:
+    """Downloads Nicotine+ has already queued or is mid-transfer on."""
+    try:
+        items = get_downloads(active_only=False)
+    except Exception:
+        return []
+    live = {"Queued", "Transferring", "Getting status", "Paused"}
+    out = []
+    for d in items:
+        path = d.get("virtual_path") or d.get("file_path") or ""
+        if d.get("status") in live and path.lower().endswith(".flac"):
+            out.append(d)
+    return out
+
+
+def _title_matches(path: str, track) -> bool:
+    title_main = re.split(r"\s+-\s+", track.title, maxsplit=1)[0]
+    return is_exact_title_match(path, track.artist, title_main) and passes_version_guard(path.lower(), track.title)
+
+
+def _match_local(track, local_files: list[Path], claimed: set) -> Path | None:
+    hits = [p for p in local_files if p not in claimed and _title_matches(p.name, track)]
+    if not hits:
+        return None
+    best = max(hits, key=lambda p: p.stat().st_size)   # larger = higher-quality encode
+    claimed.add(best)
+    return best
+
+
+def _match_live(track, live: list[dict], claimed: set) -> dict | None:
+    for d in live:
+        path = d.get("virtual_path") or d.get("file_path") or ""
+        key = (d.get("username"), path)
+        if key not in claimed and _title_matches(path, track):
+            claimed.add(key)
+            return d
+    return None
+
+
+def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None = None) -> dict[str, _TrackState]:
+    """First pass. For each track, reuse what Soulseek/Nicotine+ already gave us
+    before spending a search on it:
+      1. a matching FLAC already in the download folder -> done, no search
+      2. a matching download Nicotine+ already has queued/in flight -> adopt it
+         (the watchdog monitors it and replaces it if it stalls)
+      3. otherwise search and queue a verified match.
+    Returns the per-track state the watchdog then polls."""
+    local_files = _scan_local_flacs(local_dir)
+    live = _live_flac_downloads()
+    claimed_local: set = set()
+    claimed_live: set = set()
+
     states = {}
     for i, track in enumerate(tracks):
-        if on_progress:
-            on_progress(f"Searching Soulseek ({i + 1}/{len(tracks)}): {track.artist} - {track.title}")
         st = _TrackState(track)
+        states[track.spotify_id] = st
+        label = f"{track.artist} - {track.title}"
+
+        local = _match_local(track, local_files, claimed_local)
+        if local:
+            st.local_path = local
+            st.downloaded = True
+            st.resolved = True
+            if on_progress:
+                on_progress(f"Already downloaded ({i + 1}/{len(tracks)}): {label}")
+            continue
+
+        adopted = _match_live(track, live, claimed_live)
+        if adopted:
+            st.key = (adopted["username"], adopted.get("virtual_path") or adopted.get("file_path"))
+            if on_progress:
+                on_progress(f"Already queued in Nicotine+ ({i + 1}/{len(tracks)}): {label}")
+            continue
+
+        if on_progress:
+            on_progress(f"Searching Soulseek ({i + 1}/{len(tracks)}): {label}")
         best, _ = find_candidate(track.artist, track.title, "flac", set())
         if best:
             enqueue(best)
             st.key = (best["username"], best["file_path"])
-        states[track.spotify_id] = st
     return states
 
 
@@ -503,6 +606,8 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
 
 def download_path_for(state: _TrackState, nicotine_download_dir: str) -> Path | None:
     """The local file Nicotine+ actually saved a resolved track's download to."""
+    if state.local_path and Path(state.local_path).exists():
+        return Path(state.local_path)
     if not state.downloaded or not state.key:
         return None
     _, file_path = state.key

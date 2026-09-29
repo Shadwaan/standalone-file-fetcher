@@ -714,7 +714,7 @@ class SyncOrchestrator:
                         self.progress.message = msg
 
                     self.progress.phase = "searching"
-                    states = soulseek.search_and_queue_all(new_tracks, on_progress=_progress_cb)
+                    states = soulseek.search_and_queue_all(new_tracks, on_progress=_progress_cb, local_dir=nicotine_download_dir)
 
                     self.progress.phase = "downloading"
                     soulseek.resolve_all(states, on_progress=_progress_cb)
@@ -755,10 +755,15 @@ class SyncOrchestrator:
                             dest = playlist_folder / f"{src.stem}_{counter}{src.suffix}"
                             counter += 1
                         shutil.move(str(src), str(dest))
-                        dest = soulseek.ensure_16bit_flac(dest, originals_dir)
                         self.progress.tracks_downloaded += 1
 
-                        auth = soulseek.check_authenticity(dest)
+                        # Lossy check on the file exactly as downloaded, BEFORE any
+                        # conversion (resampling would smear the band it inspects).
+                        # An .mp3 fallback is known-lossy, so there's nothing to flag.
+                        auth = {"suspect": False}
+                        if dest.suffix.lower() == ".flac":
+                            auth = soulseek.check_authenticity(dest)
+                        dest = soulseek.normalize_flac(dest, originals_dir)
                         if auth["suspect"]:
                             msg = f"Suspect FLAC (likely transcoded from lossy source): {track.artist} - {track.title} -- {auth['reason']}"
                             logger.warning(msg)
