@@ -139,7 +139,7 @@ class SyncOrchestrator:
         try:
             return job()
         except Exception as e:
-            logger.error("Sync failed: %s", e)
+            logger.exception("Sync failed: %s", e)
             self.progress.status = "error"
             self.progress.message = str(e)
             self.progress.errors.append(str(e))

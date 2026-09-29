@@ -27,10 +27,16 @@ sys.path.insert(0, str(Path(__file__).parent))
 load_dotenv(Path(__file__).parent / ".env")
 
 # Configure logging
+# Also to sff.log, so a long sync that ends or dies while nobody is watching the
+# console (a clean exit closes that window) can still be diagnosed afterwards.
+from logging.handlers import RotatingFileHandler  # noqa: E402
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(),
+              RotatingFileHandler(Path(__file__).parent / "sff.log", maxBytes=2_000_000, backupCount=2, encoding="utf-8")],
 )
 logger = logging.getLogger("sff")
 
