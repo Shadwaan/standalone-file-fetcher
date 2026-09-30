@@ -660,6 +660,56 @@ class ApiRetryTest(unittest.TestCase):
         self.assertEqual((calls, sleeps), (1, []))
 
 
+class PeerPolitenessTest(SyncFixture):
+    """At most MAX_ACTIVE_PER_PEER requests open with any one uploader, and the
+    'are you a bot?' messages reach the user instead of being answered by sff."""
+
+    def setUp(self):
+        super().setUp()
+        for i in range(5):
+            self.nico.offer("Artist P", f"Song {i}", "flac16", "bulkpeer", f"m/0{i} - Song {i}.flac", {"4": 44100, "5": 16})
+
+    def test_no_more_than_the_cap_are_requested_from_one_peer(self):
+        jobs = [soulseek.SearchJob("Artist P", f"Song {i}", "lossless", set(), set()) for i in range(5)]
+        results = soulseek.find_candidates(jobs)
+        picked = [b for b, _ in results if b]
+        self.assertEqual(len(picked), soulseek.MAX_ACTIVE_PER_PEER)
+        self.assertTrue(all(stats.capped == 1 for b, stats in results if b is None), "the rest are waiting, not failed")
+
+    def test_requests_already_open_with_a_peer_count_against_it(self):
+        self.nico.downloads.extend({"username": "bulkpeer", "virtual_path": f"old/{i}", "status": "Queued", "progress_pct": None}
+                                   for i in range(soulseek.MAX_ACTIVE_PER_PEER))
+        mock.patch.object(soulseek, "get_downloads", lambda active_only=False: [d for d in self.nico.downloads
+                                                                                if d["status"] == "Queued"]).start()
+        best, stats = soulseek.find_candidate("Artist P", "Song 0", "lossless", set())
+        self.assertIsNone(best)
+        self.assertEqual(stats.capped, 1)
+
+    def test_a_capped_wait_does_not_use_up_a_retry(self):
+        self.nico.downloads.extend({"username": "bulkpeer", "virtual_path": f"old/{i}", "status": "Queued", "progress_pct": None}
+                                   for i in range(soulseek.MAX_ACTIVE_PER_PEER))
+        st = soulseek._TrackState(spotify_track(0, "id-p", "Song 0", "Artist P", 0))
+        # one pass of the retry loop (max_wall_seconds=0 stops it after the first iteration)
+        soulseek.resolve_all({"id-p": st}, max_wall_seconds=0)
+        self.assertEqual(st.attempts, 0, "only a busy peer had it: that is waiting for a slot, not a failure")
+        self.assertFalse(st.resolved)
+
+    def test_verification_requests_are_reported_never_answered(self):
+        import time as _t
+        logs = self.tmp / "private"
+        logs.mkdir()
+        (logs / "cabbage.log").write_text(
+            '9/30/2026 3:56:52 AM [cabbage] ProveIt: To prove you are a human downloading these files, please type "open sesame" in this chat to be added to my whitelist.\n'
+            '9/30/2026 3:57:00 AM [cabbage] thanks for downloading!\n', encoding="utf-8")
+        (logs / "server.log").write_text(
+            '9/30/2026 12:46:54 PM [server] System Message: You have been banned for 30 minutes. Do not flood.\n', encoding="utf-8")
+        found = soulseek.find_verification_requests(since=0, logs_dir=logs)
+        self.assertEqual([(r["user"], r["phrase"]) for r in found], [("cabbage", "open sesame")], "not the server's ban notice")
+        self.assertEqual(soulseek.find_verification_requests(since=_t.time() + 10, logs_dir=logs), [], "only new ones")
+        sent = [n for n in dir(soulseek) if "send" in n.lower() and "message" in n.lower()]
+        self.assertEqual(sent, [], "sff has no way to send a private message at all")
+
+
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""
 

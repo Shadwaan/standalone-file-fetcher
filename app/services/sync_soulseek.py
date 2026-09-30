@@ -256,7 +256,14 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
         progress.phase = "searching"
         states = soulseek.search_and_queue_all(to_download, on_progress=_cb, local_dir=nicotine_dir, prefer_exts=prefer)
         progress.phase = "downloading"
-        soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir, validate=_usable_download)
+        def _notice(req):
+            ask = f'reply "{req["phrase"]}"' if req["phrase"] else "reply to its message"
+            progress.errors.append(
+                f"Action needed from you: {req['user']} wants proof you are a person before it will send files -- "
+                f"open Nicotine+ > Private Chat > {req['user']} and {ask} yourself. sff will not answer these for you.")
+
+        soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir, validate=_usable_download,
+                             on_notice=_notice)
 
     # 3. FILE WORK
     progress.phase = "converting"

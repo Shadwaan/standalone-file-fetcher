@@ -478,6 +478,25 @@ class SearchStats(NamedTuple):
     raw: int        # results the network returned
     matched: int    # ...of which are this exact title (right song, right version)
     blocked: int = 0  # ...of which Nicotine+ already holds as a failed/finished transfer (see below)
+    capped: int = 0   # ...of which sit with a peer we already have MAX_ACTIVE_PER_PEER requests open with
+
+
+# Being polite to uploaders. One peer once held 91 of our requests at the same time, which is
+# exactly what makes a person's client look like a bot: several uploaders answered with
+# "prove you're human" messages. At most this many of our requests are open with any one peer
+# at a time; a track whose only source is a busy peer simply waits for a slot (and that wait
+# is not counted as a failed attempt).
+MAX_ACTIVE_PER_PEER = 3
+
+
+def _active_requests_per_peer() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    try:
+        for d in get_downloads(active_only=True):
+            counts[d.get("username")] = counts.get(d.get("username"), 0) + 1
+    except Exception:
+        pass
+    return counts
 
 
 # Nicotine+ keeps every transfer it has ever had, keyed by (user, file). Queueing a file
@@ -529,7 +548,8 @@ def find_candidates(jobs: list[SearchJob]) -> list[tuple[dict | None, SearchStat
             items[i] = items[i] + extra
 
     blocked = _unretriable_keys()
-    return [_pick(j, items[i], blocked) for i, j in enumerate(jobs)]
+    busy = _active_requests_per_peer()
+    return [_pick(j, items[i], blocked, busy) for i, j in enumerate(jobs)]
 
 
 def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str],
@@ -538,11 +558,11 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
     return find_candidates([SearchJob(artist_full, title_full, mode, exclude_users, avoid_users or set())])[0]
 
 
-def _pick(job: SearchJob, items: list[dict], blocked: set) -> tuple[dict | None, SearchStats]:
+def _pick(job: SearchJob, items: list[dict], blocked: set, busy: dict) -> tuple[dict | None, SearchStats]:
     artist_full, title_full, mode = job.artist, job.title, job.mode
     title_main = re.split(r"\s+-\s+", title_full, maxsplit=1)[0]
     cands = []
-    matched = blocked_count = 0
+    matched = blocked_count = capped_count = 0
     for it in items:
         fp = it.get("file_path") or ""
         if not is_exact_title_match(fp, artist_full, title_main):
@@ -554,6 +574,9 @@ def _pick(job: SearchJob, items: list[dict], blocked: set) -> tuple[dict | None,
             continue
         if (it.get("username"), fp) in blocked:
             blocked_count += 1
+            continue
+        if busy.get(it.get("username"), 0) >= MAX_ACTIVE_PER_PEER:
+            capped_count += 1
             continue
         attrs = it.get("file_attributes") or {}
         ranked = _lossless_candidate(it)
@@ -568,7 +591,51 @@ def _pick(job: SearchJob, items: list[dict], blocked: set) -> tuple[dict | None,
     # A source that works beats a better format from a peer that keeps failing us.
     cands.sort(key=lambda c: (c[0].get("username") not in job.avoid, c[1][0], bool(c[0].get("free_upload_slots")),
                               c[1][1], c[0].get("upload_speed") or 0, c[0].get("size") or 0), reverse=True)
-    return (cands[0][0] if cands else None), SearchStats(len(items), matched, blocked_count)
+    best = cands[0][0] if cands else None
+    if best is not None:
+        busy[best.get("username")] = busy.get(best.get("username"), 0) + 1     # counts for the next job in this batch
+    return best, SearchStats(len(items), matched, blocked_count, capped_count)
+
+
+# ─── Peers asking "are you a bot?" ──────────────────────────────────────────
+# Some uploaders answer a download request with a private message such as
+#   ProveIt: To prove you are a human downloading these files, please type "X" in this chat
+# and only serve people who reply. sff does NOT answer these itself: they exist to tell a
+# person from a program, and a program answering defeats them. It only reads Nicotine+'s
+# private-chat logs and tells you who asked and what to type, so you can reply yourself.
+_VERIFY_LINE = re.compile(r"^(?P<when>\d+/\d+/\d+ \d+:\d+:\d+ [AP]M) \[(?P<user>[^\]]+)\] (?P<text>.*(?:prove|human|whitelist|robot|bot\b).*)$",
+                          re.IGNORECASE)
+
+
+def find_verification_requests(since: float, logs_dir: str | Path | None = None) -> list[dict]:
+    """[{user, text, phrase}] for verification messages received after `since` (epoch seconds),
+    one per user (the most recent)."""
+    from datetime import datetime
+    folder = Path(logs_dir) if logs_dir else Path(os.environ.get("APPDATA", "")) / "nicotine" / "logs" / "private"
+    latest: dict[str, dict] = {}
+    try:
+        files = list(folder.glob("*.log"))
+    except OSError:
+        return []
+    for f in files:
+        try:
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+        except OSError:
+            continue
+        for line in lines:
+            m = _VERIFY_LINE.match(line.strip())
+            if not m or m["user"].lower() == "server":
+                continue
+            try:
+                when = datetime.strptime(m["when"], "%m/%d/%Y %I:%M:%S %p").timestamp()
+            except ValueError:
+                continue
+            if when < since:
+                continue
+            quoted = re.search(r'"([^"]{1,60})"', m["text"])
+            latest[m["user"]] = {"user": m["user"], "text": m["text"], "phrase": quoted.group(1) if quoted else None,
+                                 "when": when}
+    return sorted(latest.values(), key=lambda r: r["when"])
 
 
 # ─── Authenticity check: catch lossy-source transcodes in lossless files ────
@@ -816,7 +883,7 @@ def _saved_file(file_path: str, download_dir: str) -> Path | None:
 
 
 def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_seconds: float = 6 * 3600,
-                download_dir: str | None = None, validate=None) -> None:
+                download_dir: str | None = None, validate=None, on_notice=None) -> None:
     """Poll until every track is downloaded or given up: replaces stalled, dead or
     unusable sources with a freshly verified alternative (excluding every uploader
     already tried), falling back to a 320kbps MP3 only after several failed
@@ -826,9 +893,15 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
     actually usable" gate: a WAV that turns out to be compressed, or not audio at
     all, is treated like a dead source instead of being handed on."""
     start = time.time()
+    told: set[str] = set()
 
     while True:
         wait_until_connected(on_progress)
+        if on_notice:
+            for req in find_verification_requests(since=start):
+                if req["user"] not in told:
+                    told.add(req["user"])
+                    on_notice(req)
         elapsed = time.time() - start
         by_key = {}
         for d in get_downloads(active_only=False):
@@ -906,6 +979,8 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                                      for st in replacements])
             for st, (best, stats) in zip(replacements, found):
                 st.note_search(stats)
+                if not best and stats.capped:
+                    st.attempts -= 1        # only busy peers had it: waiting for a slot, not a failure
                 if best:
                     enqueue(best)
                     st.key = (best["username"], best["file_path"])
