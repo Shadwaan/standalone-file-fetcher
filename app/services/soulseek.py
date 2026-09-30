@@ -265,6 +265,11 @@ def _extract_qualifier(title_full: str) -> str | None:
     return None
 
 
+# Words that describe a KIND of version rather than whose version it is.
+_GENERIC_QUALIFIER_WORDS = {"dub", "instrumental", "extended", "radio", "original", "club", "vip", "version",
+                            "remix", "mix", "edit", "dubstrumental", "and", "with", "feat", "featuring"}
+
+
 def _qualifier_tokens(qualifier: str | None) -> list[str]:
     if not qualifier:
         return []
@@ -289,14 +294,23 @@ def passes_version_guard(file_path_lower: str, title_full: str) -> bool:
     if cand_tags and cand_tags != _numbered_tags(title_full):
         return False
     qualifier = _extract_qualifier(title_full)
-    if any(safe in file_path_lower for safe in _SAFE_PHRASES):
-        return True
-    has_alt_marker = any(marker in file_path_lower for marker in _ALT_VERSION_MARKERS)
     if not qualifier:
-        return not has_alt_marker
+        # a plain title: "(Original Mix)" is fine, an unrequested remix/live/etc. is not
+        if any(safe in file_path_lower for safe in _SAFE_PHRASES):
+            return True
+        return not any(marker in file_path_lower for marker in _ALT_VERSION_MARKERS)
+
+    # A title that names a version needs THAT version. "(Original Mix)" is no longer an
+    # escape hatch here: it is the one version this title is not.
     q_tokens = _qualifier_tokens(qualifier)
     if not q_tokens:
         return True
+    # Every distinctive word of the tag has to be there ("ickle", "prince fatty",
+    # "subatomic sound system"); the old "any one word will do" accepted a plain
+    # "Standing Firm" for "Standing Firm (ickle's Dub Mix)" because the path said "dub".
+    distinctive = [t for t in q_tokens if t not in _GENERIC_QUALIFIER_WORDS]
+    if distinctive:
+        return all(tok in file_path_lower for tok in distinctive)
     return any(tok in file_path_lower for tok in q_tokens)
 
 

@@ -580,6 +580,36 @@ class QueryBuildingTest(unittest.TestCase):
         self.assertFalse(soulseek.passes_version_guard(r"x\boostive - ties unwind (some other remix).flac", title))
 
 
+class VersionGuardTest(unittest.TestCase):
+    """Real cases from the Dub Reggae playlist, where the version IS the point."""
+
+    g = staticmethod(soulseek.passes_version_guard)
+
+    def test_a_named_dub_mix_needs_its_named_remixer(self):
+        t = "Standing Firm (ickle's Dub Mix)"
+        self.assertTrue(self.g(r"x\hotsteppas - standing firm (ickle's dub mix).flac", t))
+        self.assertFalse(self.g(r"x\dub reggae\hotsteppas - standing firm (ft. donovan kingjay).wav", t),
+                         "the plain track, even in a folder called 'dub'")
+
+    def test_every_distinctive_word_of_the_remixer_is_required(self):
+        t = "Green Brain (with Lee Scratch Perry) - Subatomic Sound System Remix"
+        self.assertTrue(self.g(r"x\green brain (subatomic sound system remix).flac", t))
+        self.assertFalse(self.g(r"x\some sound system\green brain.flac", t))
+
+    def test_original_mix_is_not_the_remix(self):
+        t = "Smokin' Love - Prince Fatty Dub"
+        self.assertFalse(self.g(r"x\stick figure - smokin' love (original mix).flac", t))
+        self.assertTrue(self.g(r"x\09 - smokin' love (prince fatty dub).flac", t))
+
+    def test_a_plain_dub_tag_needs_dub_in_the_path(self):
+        self.assertTrue(self.g(r"x\01 - switch up (dub).flac", "Switch Up - Dub"))
+        self.assertFalse(self.g(r"x\01 - switch up.flac", "Switch Up - Dub"))
+
+    def test_plain_titles_are_unchanged(self):
+        self.assertTrue(self.g(r"x\bicep - satisfy (original mix).flac", "Satisfy"))
+        self.assertFalse(self.g(r"x\bicep - satisfy (some remix).flac", "Satisfy"))
+
+
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""
 
