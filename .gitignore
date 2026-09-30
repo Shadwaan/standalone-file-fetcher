@@ -16,3 +16,4 @@ __pycache__/
 # AI-session handoff notes (local continuity only, not project docs)
 HANDOFF_*.md
 sff.log*
+server_out.txt
