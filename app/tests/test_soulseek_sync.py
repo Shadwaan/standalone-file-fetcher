@@ -478,7 +478,7 @@ class GiveUpEarlyTest(SyncFixture):
         app_config.set_output_formats(["aiff"])
         result = self.run_sync()
         query = soulseek._build_query("Nobody", "Ghost Song")
-        self.assertEqual(self.nico.searches.count(query), 5, "1 initial + 4 retries, not the full 8")
+        self.assertEqual(self.nico.searches.count(query), 4, "1 initial + 3 retries, then it gives up")
         self.assertTrue(any("no results" in e for e in result["errors"]), result["errors"])
 
 
@@ -608,6 +608,10 @@ class FormatHierarchyTest(SyncFixture):
         self.nico.offer("Artist Q", "Track Q", "flac16", "mp3guy", r"a - Track Q.mp3", {"0": 320}, free=True)
         self.assertIsNone(self.best(), "an MP3 is never picked while looking for lossless")
         self.assertEqual(self.best(mode="mp3"), "mp3guy")
+        self.nico.offer("Artist Q", "Track Q", "wav16", "lateguy", r"c\01 - Track Q.wav", {}, free=False)
+        self.assertEqual(self.best(mode="mp3"), "lateguy", "the fallback stage still prefers lossless if it turns up")
+        self.nico.catalog.clear()
+        self.nico.offer("Artist Q", "Track Q", "flac16", "mp3guy", r"a\01 - Track Q.mp3", {"0": 320}, free=True)
         self.nico.offer("Artist Q", "Track Q", "wav16", "wavguy", r"b - Track Q.wav", {}, free=False)
         self.assertEqual(self.best(), "wavguy", "even a slot-less WAV beats an MP3")
 

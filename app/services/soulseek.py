@@ -33,8 +33,15 @@ logger = logging.getLogger(__name__)
 SEARCH_WAIT_SECONDS = 22
 POLL_SECONDS = 90
 STALL_POLLS = 3
-MAX_ATTEMPTS_PER_TRACK = 8
-LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK = 4
+MAX_ATTEMPTS_PER_TRACK = 6
+# After this many lossless-only searches the search also accepts a genuine 320 kbps MP3.
+# The fallback still ranks lossless first, so it costs nothing to start it early: it only
+# ever adds MP3 as a last choice. (Re-running the same lossless-only search finds the same
+# things; results do vary between searches, which the later attempts still benefit from.)
+LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK = 2
+# ...but a song of which not a single file has ever shown up is dropped sooner-than-never,
+# after this many searches, since more of the same 90 seconds apart only wastes time.
+GIVE_UP_IF_NOTHING_AFTER = 4
 
 DEAD_STATUSES = {
     "File not shared.", "User logged off", "Banned (banana)",
@@ -505,14 +512,11 @@ def _pick(job: SearchJob, items: list[dict], blocked: set) -> tuple[dict | None,
             blocked_count += 1
             continue
         attrs = it.get("file_attributes") or {}
-        if mode == "lossless":
-            ranked = _lossless_candidate(it)
-            if ranked is None:
-                continue
-        else:
-            if _ext(fp) != ".mp3" or attrs.get("0") != 320:
-                continue
-            ranked = (FORMAT_TIER[".mp3"], 0)
+        ranked = _lossless_candidate(it)
+        if ranked is None and mode == "mp3" and _ext(fp) == ".mp3" and attrs.get("0") == 320:
+            ranked = (FORMAT_TIER[".mp3"], 0)       # the fallback: lossless still wins if any turns up
+        if ranked is None:
+            continue
         cands.append((it, ranked))
 
     # Format tier first (FLAC > WAV = AIFF > MP3), then within a tier: a free upload
@@ -835,7 +839,7 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
             st.attempts += 1
             # Four searches (each also retried with a prefix query) and not one file of this
             # song has ever shown up: more of the same, 90 seconds apart, only wastes time.
-            nothing_exists = st.key is None and st.attempts > LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK                 and st.max_matched == 0
+            nothing_exists = st.key is None and st.attempts >= GIVE_UP_IF_NOTHING_AFTER and st.max_matched == 0
             if st.attempts > MAX_ATTEMPTS_PER_TRACK or nothing_exists:
                 st.resolved = True
                 logger.info("gave up on %s - %s after %d attempts: %s", st.track.artist, st.track.title,
