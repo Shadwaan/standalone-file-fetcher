@@ -180,7 +180,9 @@ def _clean_words(text: str, extra_strip_words=()) -> list[str]:
     text = re.sub(r"(?<=\w)['’](?=\w)", "", text)     # what's / whats / what’s are one word
     text = _PUNCT_RE.sub(" ", text.lower())
     strip_set = _QUALIFIER_WORDS | _CONNECTOR_WORDS | {w.lower() for w in extra_strip_words}
-    return [w for w in text.split() if w not in strip_set and len(w) > 1 and not w.isdigit()]
+    # Digits are part of a title ("Liquid Interlude 2" is not "Liquid Interlude 4"); track
+    # numbers in filenames are removed separately, before this runs.
+    return [w for w in text.split() if w not in strip_set and (len(w) > 1 or w.isdigit())]
 
 
 def _clean_tokens(text: str, extra_strip_words=()) -> set[str]:
@@ -234,14 +236,15 @@ def is_exact_title_match(file_path: str, artist_full: str, title_main: str) -> b
     else:
         candidates_to_check = [_LEADING_NUM_RE.sub("", stem)]
 
+    target_joined = "".join(_clean_words(title_main, strip_words))
     for cand in candidates_to_check:
-        cand_no_num = _LEADING_NUM_RE.sub("", cand)
-        cand_tokens = _clean_tokens(cand_no_num, extra_strip_words=strip_words)
-        if cand_tokens == target_tokens:
-            return True
-        # "Rollercoaster" vs "Roller Coaster": same word, spaced differently
-        if "".join(_clean_words(cand_no_num, strip_words)) == "".join(_clean_words(title_main, strip_words)):
-            return True
+        # the second form keeps a leading number, for titles that start with one ("22")
+        for text in (_LEADING_NUM_RE.sub("", cand), cand):
+            if _clean_tokens(text, extra_strip_words=strip_words) == target_tokens:
+                return True
+            # "Rollercoaster" vs "Roller Coaster": same word, spaced differently
+            if "".join(_clean_words(text, strip_words)) == target_joined:
+                return True
     return False
 
 
@@ -262,10 +265,22 @@ def _qualifier_tokens(qualifier: str | None) -> list[str]:
     return [w for w in words if w not in {"remix", "mix", "the", "a", "of", "edit", "version"} and len(w) > 1]
 
 
+_NUMBERED_TAG_RE = re.compile(r"\b(mix|part|pt|version|vol|volume|take)\.?\s*0*(\d+)\b")
+
+
+def _numbered_tags(text: str) -> set[tuple[str, str]]:
+    return {("part" if w == "pt" else w, n) for w, n in _NUMBERED_TAG_RE.findall(text.lower())}
+
+
 def passes_version_guard(file_path_lower: str, title_full: str) -> bool:
     """True if this candidate is an acceptable version match for the title:
     a plain title rejects an unrequested remix/rework/etc; a title that names
-    a specific remix requires that remixer's name to actually appear."""
+    a specific remix requires that remixer's name to actually appear; and a numbered
+    version ("Mix 1", "Part 2") must not be a different number."""
+    filename = re.split(r"[\\/]", file_path_lower)[-1]      # not the folder: "Vol. 1" compilations
+    cand_tags = _numbered_tags(filename)
+    if cand_tags and cand_tags != _numbered_tags(title_full):
+        return False
     qualifier = _extract_qualifier(title_full)
     if any(safe in file_path_lower for safe in _SAFE_PHRASES):
         return True

@@ -446,6 +446,37 @@ class MatcherTest(unittest.TestCase):
         self.assertEqual(best["username"], "u1")
 
 
+class NumberedTitleTest(unittest.TestCase):
+    """Real mistakes from a sync: 'Liquid Interlude 2' was matched by the files for
+    'Liquid Interlude 1' and '4' (digits were being ignored), and 'Wake Up - Mix 1'
+    by '(Mix 2)'. A wrong-numbered file would have been imported under the right name."""
+
+    def match(self, path, artist, title):
+        main = re.split(r"\s+-\s+", title, maxsplit=1)[0]        # as find_candidate does
+        return soulseek.is_exact_title_match(path, artist, main) and soulseek.passes_version_guard(path.lower(), title)
+
+    def test_numbered_titles_only_match_their_own_number(self):
+        a, t = "Kings Of Tomorrow", "Liquid Interlude 2"
+        self.assertTrue(self.match(r"x\02 - Kings of Tomorrow - Liquid Interlude 2.flac", a, t))
+        self.assertTrue(self.match(r"x\02_-_Kings_Of_Tomorrow_-_Liquid_Interlude_2.flac", a, t))
+        self.assertFalse(self.match(r"x\01 - Kings of Tomorrow - Liquid Interlude 1.flac", a, t))
+        self.assertFalse(self.match(r"x\04_-_Kings_Of_Tomorrow_-_Liquid_Interlude_4.flac", a, t))
+
+    def test_numbered_mix_only_matches_its_own_number(self):
+        a, t = "Fire Island", "Wake Up - Mix 1"
+        self.assertTrue(self.match(r"x\Fire Island - Wake Up (Mix 1).flac", a, t))
+        self.assertFalse(self.match(r"x\Fire Island - Wake Up (Mix 2).flac", a, t))
+        self.assertFalse(self.match(r"x\Fire Island - Wake Up (Mix 2).flac", "Fire Island", "Wake Up"))
+
+    def test_compilation_folder_numbers_do_not_count(self):
+        self.assertTrue(self.match(r"x\Ten Years of On Loop, Vol. 1\K-Lone - iluvu.flac", "K-Lone", "iluvu"))
+
+    def test_title_with_a_digit_still_matches_its_own_filenames(self):
+        a, t = "Mount Kimbi", "No Need 2 Be Sorry, Call Me?"
+        self.assertTrue(self.match(r"x\02 No Need 2 Be Sorry, Call Me_.flac", a, t))
+        self.assertTrue(self.match(r"x\02-mount_kimbi-no_need_2_be_sorry_call_me.flac", a, t))
+
+
 class FilenameConventionTest(unittest.TestCase):
     """The matcher must accept the SAME song however people name the file. This is the
     net that would have caught 'Can We Still Be Friends' by 'Barry Can't Swim' (a title
