@@ -112,6 +112,9 @@ class FakeRekordbox:
     def get_playlist_name(self, pid):
         return self.playlists.get(pid, {}).get("name")
 
+    def get_library_files(self):
+        return [(c["title"], c["path"]) for c in self.contents.values()]
+
     def get_playlist_track_paths(self, pid):
         return {self.contents[c]["title"]: self.contents[c]["path"] for c in self.playlists.get(pid, {}).get("tracks", [])}
 
@@ -181,16 +184,18 @@ class SyncFixture(unittest.TestCase):
             mock.patch.object(soulseek, name, attr).start()
         mock.patch("time.sleep", lambda s: None).start()
         for name in ("find_playlist_id", "get_playlist_name", "get_playlist_track_paths", "find_or_create_playlist",
-                     "import_track_unanalyzed", "add_track_to_playlist", "remove_track_from_playlist",
+                     "import_track_unanalyzed", "add_track_to_playlist", "get_library_files", "remove_track_from_playlist",
                      "reorder_playlist_by_titles", "flush_wal"):
             mock.patch.object(rb, name, getattr(self.rbfake, name)).start()
 
         self.spotify_tracks = []
+        self.playlist_names = {"PL1": "Deep tech"}
         outer = self
 
         class FakeSpotify:
             def get_prefixed_playlists(self):
-                return [{"id": "PL1", "name": "FF Deep tech", "display_name": "Deep tech", "snapshot_id": "s1"}]
+                return [{"id": pid, "name": f"FF {name}", "display_name": name, "snapshot_id": "s1"}
+                        for pid, name in outer.playlist_names.items()]
 
             def get_playlist_tracks(self, pid, name):
                 return [spotify_track(0, t.spotify_id, t.title, t.artist, i) for i, t in enumerate(outer.spotify_tracks)]
@@ -370,6 +375,52 @@ class SoulseekSyncTest(SyncFixture):
         self.assertEqual(state["rb_playlist_id"], pid)
         self.assertEqual(len(state["tracks"]), 5)
         self.assertEqual(state["tracks"]["id-alpha"]["file_path"], made["Track Alpha"], "recorded from THAT playlist's own file")
+
+
+class NoDuplicateDownloadsTest(SyncFixture):
+    """The same guarantee the YouTube path gives: a track we already have -- in another
+    playlist, in the Rekordbox library, or on disk -- is never downloaded again."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-x", "Track Xray", "Artist X", 0)]
+
+    def query(self):
+        return soulseek._build_query("Artist X", "Track Xray")
+
+    def test_same_track_in_two_playlists_is_downloaded_once_and_the_file_shared(self):
+        self.playlist_names = {"PL1": "Deep tech", "PL2": "Classic"}
+        self.nico.offer("Artist X", "Track Xray", "flac16", "u1", "m/01 - Track Xray.flac", {"4": 44100, "5": 16})
+        self.run_sync()
+        self.assertEqual(self.nico.searches.count(self.query()), 1, "second playlist must not search again")
+        paths = [p for _, p in self.rbfake.imports]
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(paths[0], paths[1], "one physical file, in both playlists")
+        self.assertEqual(len(list(self.music.rglob("*.aiff"))), 1, "no second copy on disk")
+        self.assertEqual(sorted(p["name"] for p in self.rbfake.playlists.values()), ["Classic AIFF", "Deep tech AIFF"])
+
+    def test_lossless_file_already_in_the_rekordbox_library_is_reused(self):
+        lib = self.tmp / "Library" / "Artist X - Track Xray.flac"
+        make_audio(lib, "flac16")
+        self.rbfake.add_existing_playlist("Some other playlist", {"Track Xray": str(lib).replace("\\", "/")})
+        self.run_sync()
+        self.assertEqual(self.nico.searches, [], "found in the library, so no Soulseek search")
+        aiffs = list(self.music.rglob("*.aiff"))
+        self.assertEqual(len(aiffs), 1)
+        self.assertEqual(pcm_md5(aiffs[0]), pcm_md5(lib), "derived bit-exactly from the library file")
+        self.assertTrue(lib.exists(), "the library file is left where it was")
+
+    def test_an_mp3_in_the_library_is_not_a_source_for_a_lossless_playlist(self):
+        lib = self.tmp / "Library" / "Artist X - Track Xray.mp3"
+        lib.parent.mkdir()
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "anoisesrc=d=2", "-b:a", "320k", str(lib)],
+                       capture_output=True, check=True)
+        self.rbfake.add_existing_playlist("MP3 playlist", {"Track Xray": str(lib).replace("\\", "/")})
+        self.nico.offer("Artist X", "Track Xray", "flac16", "u1", "m/01 - Track Xray.flac", {"4": 44100, "5": 16})
+        self.run_sync()
+        self.assertEqual(self.nico.searches.count(self.query()), 1, "an MP3 can't stand in for lossless, so it searched")
+        self.assertEqual(len(list(self.music.rglob("*.aiff"))), 1)
 
 
 class FormatHierarchyTest(SyncFixture):

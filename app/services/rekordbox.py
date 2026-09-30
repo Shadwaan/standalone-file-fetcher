@@ -908,6 +908,24 @@ def get_playlist_track_paths(playlist_id: str) -> dict[str, str]:
         return {}
 
 
+def get_library_files() -> list[tuple[str, str]]:
+    """(title, file path) for every track in the Rekordbox library, in ONE read --
+    for callers that must check many tracks against the whole library (per-track
+    lookups would each rescan it)."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        out = [(str(c.Title or ""), str(c.FolderPath or "")) for c in db.session.query(tables.DjmdContent).all()]
+        db.session.close()
+        db.engine.dispose()
+        return out
+    except Exception as e:
+        logger.warning("Failed to read the Rekordbox library: %s", e)
+        return []
+
+
 def get_playlist_track_titles(playlist_id: str) -> set[str]:
     """Titles of every track currently in a Rekordbox playlist -- the ground
     truth for "is this track already done", since it reads the durable

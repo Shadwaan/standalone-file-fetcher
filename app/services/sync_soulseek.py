@@ -85,14 +85,39 @@ def _inspect_variant(pl_state: dict, fmt: str, base_name: str, tracks: list, cur
     return _Variant(fmt, v, v["display_name"], new_tracks, known_ids - current_ids)
 
 
-def _existing_output(pl_state: dict, spotify_id: str) -> Path | None:
-    """A file we already produced for this track in ANY format -- a valid source
-    for deriving a newly-wanted format without downloading again."""
-    for v in pl_state.get("variants", {}).values():
-        path = (v.get("tracks", {}).get(spotify_id) or {}).get("file_path")
-        if path and Path(path).is_file():
-            return Path(path)
-    return None
+def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str]]) -> list[Path]:
+    """Lossless files we ALREADY HAVE for this track, best first -- so it is never
+    downloaded twice. Same idea as the YouTube path's dedup (Rekordbox library, then
+    disk), with one difference: only lossless files count. An MP3 already in the
+    library must not become the source of an "AIFF".
+
+      1. what sff produced before, for this Spotify track in ANY playlist (the same
+         track sitting in two playlists is one file, not two downloads)
+      2. the Rekordbox library, matched by title + artist -- catches files sff's own
+         state never heard of (built by hand, an older version, another tool)"""
+    found: list[Path] = []
+
+    def consider(path_str):
+        if not path_str:
+            return
+        path = Path(path_str)
+        if path not in found and path.suffix.lower() in audio_formats.LOSSLESS_EXTS and path.is_file()                 and audio_formats.is_valid_lossless(path):
+            found.append(path)
+
+    for pl in playlists_state.values():
+        for v in pl.get("variants", {}).values():
+            consider((v.get("tracks", {}).get(track.spotify_id) or {}).get("file_path"))
+
+    title = track.title.strip().lower()
+    first_artist = track.artist.split(",")[0].strip().lower()
+    exact_stem = f"{track.artist} - {track.title}".lower()
+    for lib_title, lib_path in library:
+        stem = Path(lib_path).stem.lower()
+        if stem == exact_stem or (lib_title.strip().lower() == title and first_artist in lib_path.lower()):
+            consider(lib_path)
+
+    found.sort(key=lambda p: soulseek.FORMAT_TIER.get(p.suffix.lower(), 0), reverse=True)
+    return found
 
 
 def _usable_download(path: Path) -> bool:
@@ -173,6 +198,7 @@ def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: st
     # the library yet" and would re-download everything.
     orch._wait_until_rekordbox_closed("checking what's already in your library")
     variants = {fmt: _inspect_variant(pl_state, fmt, base_name, tracks, current_ids) for fmt in formats}
+    library = rb.get_library_files()
 
     needed: dict[str, list[str]] = {}      # spotify_id -> formats still missing for it
     for fmt in formats:
@@ -186,7 +212,7 @@ def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: st
             needed.setdefault(t.spotify_id, []).append(fmt)
 
     if needed or any(v.removed_ids for v in variants.values()):
-        planned = _produce_files(orch, needed, track_by_id, variants, pl_state, music_folder, nicotine_dir)
+        planned = _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library)
         _write_to_rekordbox(orch, planned, variants, tracks)
 
     pl_state["name"], pl_state["display_name"] = pl_name, base_name
@@ -194,7 +220,7 @@ def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: st
     orch._save_state()      # after every playlist, so an interruption can't lose finished ones
 
 
-def _produce_files(orch, needed, track_by_id, variants, pl_state, music_folder, nicotine_dir):
+def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library):
     """Stages 2 and 3: get a source for each track that needs one, then convert
     and tag it into every format it's missing. Returns [(spotify_id, fmt, path)].
     Never touches Rekordbox."""
@@ -204,7 +230,8 @@ def _produce_files(orch, needed, track_by_id, variants, pl_state, music_folder, 
         return []
 
     # 2. SOURCE -- reuse what we already have before going to Soulseek
-    derived = {sid: p for sid in needed if (p := _existing_output(pl_state, sid))}
+    existing = {sid: _existing_sources(orch._state["playlists"], track_by_id[sid], library) for sid in needed}
+    derived = {sid: found[0] for sid, found in existing.items() if found}
     to_download = [track_by_id[sid] for sid in needed if sid not in derived]
     states = {}
     if to_download:
@@ -243,6 +270,17 @@ def _produce_files(orch, needed, track_by_id, variants, pl_state, music_folder, 
                     msg = f"Suspect file (likely transcoded from a lossy source): {label} -- {auth['reason']}"
                     logger.warning(msg)
                     progress.errors.append(msg)
+
+        # A file that is already exactly the wanted format is reused in place (the same
+        # physical file can sit in several Rekordbox playlists) -- no copy, no rewrite.
+        for fmt in list(fmts):
+            ready = next((p for p in existing.get(sid, []) if audio_formats.is_ready(p, fmt)), None)
+            if ready:
+                planned.append((sid, fmt, ready))
+                progress.tracks_skipped += 1
+                fmts.remove(fmt)
+        if not fmts:
+            continue
 
         # everything read from the source happens BEFORE it can be moved
         carry = tagging.read_carry_over_tags(src)
