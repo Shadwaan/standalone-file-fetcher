@@ -552,6 +552,34 @@ class AlreadyFailedInNicotineTest(SyncFixture):
         self.assertIn("already failed", st.why_no_source())
 
 
+class QueryBuildingTest(unittest.TestCase):
+    """Real Spotify titles that produced 0 results because of what was in the query."""
+
+    def q(self, artist, title):
+        return soulseek._build_query(artist, title)
+
+    def test_credits_and_version_tags_are_left_out_of_the_query(self):
+        self.assertEqual(self.q("Protoje, Zion I Kings, Original Koffee", "Switch Up (feat. Original Koffee) - Dub"), "Protoje Switch Up")
+        self.assertEqual(self.q("Green Lion Crew, Lee \"Scratch\" Perry", "Green Brain (with Lee \"Scratch\" Perry & Yaadcore)"),
+                         "Green Lion Crew Green Brain")
+        self.assertEqual(self.q("Boostive, Racquel Jones", "Ties Unwind (NOiSEMAKER dub Mix)"), "Boostive Ties Unwind")
+        self.assertEqual(self.q("Hotsteppas, ickle", "Standing Firm (ickle's Dub Mix)"), "Hotsteppas Standing Firm")
+
+    def test_plain_titles_are_unchanged(self):
+        self.assertEqual(self.q("Bicep", "Satisfy"), "Bicep Satisfy")
+        self.assertEqual(self.q("Mungo's Hi Fi", "Pulsating Dub"), "Mungo's Hi Fi Pulsating Dub")
+        self.assertEqual(self.q("Stick Figure", "Smokin' Love (with Collie Buddz) - Prince Fatty Dub"), "Stick Figure Smokin' Love")
+
+    def test_a_title_that_is_only_a_bracket_still_produces_a_query(self):
+        self.assertTrue(self.q("Artist", "(Untitled)").strip())
+
+    def test_the_version_is_still_enforced_on_the_results(self):
+        """Dropping '(NOiSEMAKER dub Mix)' from the query must not let the plain track through."""
+        title = "Ties Unwind (NOiSEMAKER dub Mix)"
+        self.assertTrue(soulseek.passes_version_guard(r"x\boostive - ties unwind (noisemaker dub mix).flac", title))
+        self.assertFalse(soulseek.passes_version_guard(r"x\boostive - ties unwind (some other remix).flac", title))
+
+
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""
 

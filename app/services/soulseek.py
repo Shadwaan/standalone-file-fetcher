@@ -293,10 +293,22 @@ def passes_version_guard(file_path_lower: str, title_full: str) -> bool:
     return any(tok in file_path_lower for tok in q_tokens)
 
 
+def _query_title(title_main: str) -> str:
+    """The title as it should appear in a search. Soulseek returns only files matching
+    EVERY term, so anything people don't put in filenames must go: a "(feat. X)" or
+    "(with X & Y)" credit, a "(... Dub Mix)" tag (the version is checked on the results
+    instead), quote marks and ampersands. Left in, "Green Brain (with Lee "Scratch"
+    Perry & Yaadcore)" matches nothing at all."""
+    text = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", title_main)
+    text = re.sub(r'["\u201c\u201d&]', " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or title_main.strip()
+
+
 def _build_query(artist_full: str, title_full: str) -> str:
     primary_artist = artist_full.split(",")[0].strip()
     title_main = re.split(r"\s+-\s+", title_full, maxsplit=1)[0]
-    return f"{primary_artist} {title_main}".strip()
+    return f"{primary_artist} {_query_title(title_main)}".strip()
 
 
 def _ext(path: str) -> str:
@@ -384,7 +396,7 @@ def _search(query: str) -> list[dict]:
 def _fallback_query(artist_full: str, title_main: str) -> str | None:
     """A prefix search for a single long word ("Rollercoaster" -> "Roller"), which
     also finds files spelled "Roller Coaster". Only worth trying for those titles."""
-    words = re.findall(r"[A-Za-z0-9]+", title_main)
+    words = re.findall(r"[A-Za-z0-9]+", _query_title(title_main))
     if len(words) != 1 or len(words[0]) < 8:
         return None
     primary_artist = artist_full.split(",")[0].strip()
