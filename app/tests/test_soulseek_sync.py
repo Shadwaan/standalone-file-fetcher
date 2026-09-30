@@ -508,6 +508,50 @@ class ConnectionGuardTest(SyncFixture):
         self.assertEqual(sleeps.count(soulseek.SEARCH_GAP_SECONDS), 2, "a gap between searches, none before the first")
 
 
+class AlreadyFailedInNicotineTest(SyncFixture):
+    """Queueing a file Nicotine+ already has a record of is a no-op ('duplicate'), so a
+    source that earlier ended 'File not shared' must never be picked again."""
+
+    def setUp(self):
+        super().setUp()
+        self.nico.offer("Artist Q", "Track Q", "flac16", "deadguy", "a/01 - Track Q.flac", {"4": 44100, "5": 16}, free=True, speed=9000)
+        self.nico.offer("Artist Q", "Track Q", "flac16", "goodguy", "b/01 - Track Q.flac", {"4": 44100, "5": 16}, free=False, speed=10)
+
+    def pick(self):
+        best, stats = soulseek.find_candidate("Artist Q", "Track Q", "lossless", set())
+        return best["username"], stats
+
+    def record(self, user, status):
+        self.nico.downloads.append({"username": user, "virtual_path": ("a" if user == "deadguy" else "b") + "/01 - Track Q.flac",
+                                    "status": status, "progress_pct": 0})
+
+    def test_a_source_that_already_failed_in_nicotine_is_skipped(self):
+        self.assertEqual(self.pick()[0], "deadguy", "the better source, before it is known to be dead")
+        self.record("deadguy", "File not shared.")
+        user, stats = self.pick()
+        self.assertEqual(user, "goodguy")
+        self.assertEqual(stats.blocked, 1)
+
+    def test_a_source_that_was_already_downloaded_is_skipped_too(self):
+        self.record("deadguy", "Finished")
+        self.assertEqual(self.pick()[0], "goodguy")
+
+    def test_a_user_who_is_merely_offline_is_not_blocked(self):
+        """Nicotine+ resumes 'User logged off' transfers by itself when the user returns."""
+        self.record("deadguy", "User logged off")
+        self.assertEqual(self.pick()[0], "deadguy")
+
+    def test_the_reason_for_giving_up_mentions_it(self):
+        self.nico.catalog.clear()
+        self.nico.offer("Artist Q", "Track Q", "flac16", "deadguy", "a/01 - Track Q.flac", {"4": 44100, "5": 16})
+        self.record("deadguy", "File not shared.")
+        best, stats = soulseek.find_candidate("Artist Q", "Track Q", "lossless", set())
+        self.assertIsNone(best)
+        st = soulseek._TrackState(None)
+        st.note_search(stats)
+        self.assertIn("already failed", st.why_no_source())
+
+
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""
 

@@ -414,6 +414,27 @@ def _avoided_peers() -> set[str]:
 class SearchStats(NamedTuple):
     raw: int        # results the network returned
     matched: int    # ...of which are this exact title (right song, right version)
+    blocked: int = 0  # ...of which Nicotine+ already holds as a failed/finished transfer (see below)
+
+
+# Nicotine+ keeps every transfer it has ever had, keyed by (user, file). Queueing a file
+# it already has a record of does NOTHING -- the API answers "duplicate" and the old
+# status stays. So a source whose earlier attempt ended "File not shared" (or was already
+# downloaded) can never be retried by asking again; picking it just burns an attempt. These
+# are skipped. "User logged off" is not here: Nicotine+ resumes those on its own when the
+# user comes back.
+UNRETRIABLE_STATUSES = {
+    "File not shared.", "Finished", "Cancelled", "Banned", "Banned (banana)",
+    "Verification required", "Enqueue failed due to internal error",
+}
+
+
+def _unretriable_keys() -> set[tuple]:
+    try:
+        return {(d.get("username"), d.get("virtual_path") or d.get("file_path"))
+                for d in get_downloads(active_only=False) if d.get("status") in UNRETRIABLE_STATUSES}
+    except Exception:
+        return set()
 
 
 class SearchJob(NamedTuple):
@@ -444,7 +465,8 @@ def find_candidates(jobs: list[SearchJob]) -> list[tuple[dict | None, SearchStat
         for i, extra in zip(retry, _search_many(retry_queries)):
             items[i] = items[i] + extra
 
-    return [_pick(j, items[i]) for i, j in enumerate(jobs)]
+    blocked = _unretriable_keys()
+    return [_pick(j, items[i], blocked) for i, j in enumerate(jobs)]
 
 
 def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str],
@@ -453,11 +475,11 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
     return find_candidates([SearchJob(artist_full, title_full, mode, exclude_users, avoid_users or set())])[0]
 
 
-def _pick(job: SearchJob, items: list[dict]) -> tuple[dict | None, SearchStats]:
+def _pick(job: SearchJob, items: list[dict], blocked: set) -> tuple[dict | None, SearchStats]:
     artist_full, title_full, mode = job.artist, job.title, job.mode
     title_main = re.split(r"\s+-\s+", title_full, maxsplit=1)[0]
     cands = []
-    matched = 0
+    matched = blocked_count = 0
     for it in items:
         fp = it.get("file_path") or ""
         if not is_exact_title_match(fp, artist_full, title_main):
@@ -466,6 +488,9 @@ def _pick(job: SearchJob, items: list[dict]) -> tuple[dict | None, SearchStats]:
             continue
         matched += 1
         if it.get("username") in job.exclude:
+            continue
+        if (it.get("username"), fp) in blocked:
+            blocked_count += 1
             continue
         attrs = it.get("file_attributes") or {}
         if mode == "lossless":
@@ -483,7 +508,7 @@ def _pick(job: SearchJob, items: list[dict]) -> tuple[dict | None, SearchStats]:
     # A source that works beats a better format from a peer that keeps failing us.
     cands.sort(key=lambda c: (c[0].get("username") not in job.avoid, c[1][0], bool(c[0].get("free_upload_slots")),
                               c[1][1], c[0].get("upload_speed") or 0, c[0].get("size") or 0), reverse=True)
-    return (cands[0][0] if cands else None), SearchStats(len(items), matched)
+    return (cands[0][0] if cands else None), SearchStats(len(items), matched, blocked_count)
 
 
 # ─── Authenticity check: catch lossy-source transcodes in lossless files ────
@@ -574,7 +599,7 @@ def check_authenticity(path: Path) -> dict:
 
 class _TrackState:
     __slots__ = ("track", "key", "mode", "history", "tried_users", "attempts", "resolved", "downloaded", "local_path",
-                 "max_raw", "max_matched")
+                 "max_raw", "max_matched", "max_blocked")
 
     def __init__(self, track):
         self.track = track
@@ -588,17 +613,20 @@ class _TrackState:
         self.local_path = None   # set when the file was already on disk
         self.max_raw = 0         # best search so far: results returned / results that were this song
         self.max_matched = 0
+        self.max_blocked = 0
 
     def note_search(self, stats: SearchStats) -> None:
         self.max_raw = max(self.max_raw, stats.raw)
         self.max_matched = max(self.max_matched, stats.matched)
+        self.max_blocked = max(self.max_blocked, stats.blocked)
 
     def why_no_source(self) -> str:
         if self.max_raw == 0:
             return "the network returned no results for it"
         if self.max_matched == 0:
             return f"{self.max_raw} results came back but none matched this title"
-        return f"{self.max_matched} matching files were found but none was usable"
+        note = f", {self.max_blocked} of them already failed or were used up in Nicotine+" if self.max_blocked else ""
+        return f"{self.max_matched} matching files were found but none was usable{note}"
 
 
 def _scan_local_lossless(download_dir: str | None) -> list[Path]:
