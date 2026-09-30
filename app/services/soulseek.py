@@ -375,14 +375,18 @@ FORMAT_TIER = {".flac": 2, ".wav": 1, ".aif": 1, ".aiff": 1, ".mp3": 0}
 
 def _lossless_candidate(item: dict) -> tuple[int, int] | None:
     """(format tier, evidence) for a lossless candidate, or None if it isn't one.
-    FLAC peers report a bit depth (attr 5), which we require. WAV/AIFF results are
-    rare and usually carry no attributes at all, so they're accepted on weaker
-    evidence (1 = the peer reports a bit depth or a PCM-sized bitrate, 0 = nothing)
-    and PROVEN after download instead -- see resolve_all's `validate`."""
+    Many peers report no attributes at all (a real "16BIT-WEB-FLAC" release came back
+    without a bit depth and was being rejected as unproven), so a file is accepted on weaker
+    evidence (1 = the peer reports a bit depth or a PCM-sized bitrate, 0 = nothing) and
+    PROVEN after download instead: see resolve_all's `validate`, and the conversion to
+    16-bit. Only a reported depth BELOW 16 rules a FLAC out up front."""
     ext = _ext(item.get("file_path") or "")
     attrs = item.get("file_attributes") or {}
     if ext == ".flac":
-        return (FORMAT_TIER[".flac"], 1) if attrs.get("5") is not None else None
+        depth = attrs.get("5")
+        if depth is not None and depth < 16:
+            return None
+        return FORMAT_TIER[".flac"], (1 if depth is not None else 0)
     if ext in (".wav", ".aif", ".aiff"):
         evidence = 1 if (attrs.get("5") is not None or (attrs.get("0") or 0) >= 700) else 0
         return FORMAT_TIER[ext], evidence
@@ -746,6 +750,15 @@ class _TrackState:
         self.max_raw = max(self.max_raw, stats.raw)
         self.max_matched = max(self.max_matched, stats.matched)
         self.max_blocked = max(self.max_blocked, stats.blocked)
+
+    def failure_category(self) -> str:
+        if self.max_raw == 0:
+            return "no results"
+        if self.max_matched == 0:
+            return "no match"
+        if self.tried_users:
+            return "source did not deliver"
+        return "wrong quality / dead source"
 
     def why_no_source(self) -> str:
         if self.max_raw == 0:

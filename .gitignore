@@ -17,3 +17,6 @@ __pycache__/
 HANDOFF_*.md
 sff.log*
 server_out.txt
+failed_tracks*.json
+failed_tracks*.csv
+failed_tracks*.txt

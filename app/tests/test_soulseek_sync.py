@@ -6,6 +6,7 @@ Nothing here touches a real Rekordbox library, Soulseek, or your sync_state.json
 Needs ffmpeg/ffprobe on PATH.   Run:   python -m unittest discover -s tests -v
 """
 
+import json
 import re
 import subprocess
 import sys
@@ -18,7 +19,7 @@ APP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP))
 
 from models.track import TrackInfo  # noqa: E402
-from services import app_config, audio_formats, soulseek, sync, tagging  # noqa: E402
+from services import app_config, audio_formats, failure_log, soulseek, sync, tagging  # noqa: E402
 from services import rekordbox as rb  # noqa: E402
 import mutagen  # noqa: E402
 
@@ -173,6 +174,8 @@ class SyncFixture(unittest.TestCase):
         # config + state live in the temp dir, never the real ones
         mock.patch.object(app_config, "CONFIG_FILE", self.tmp / "app_config.json").start()
         mock.patch.object(sync, "STATE_FILE", self.tmp / "sync_state.json").start()
+        mock.patch.object(failure_log, "FILE", self.tmp / "failed_tracks.json").start()
+        mock.patch.object(failure_log, "CSV_FILE", self.tmp / "failed_tracks.csv").start()
         app_config.save({"music_folder": str(self.music), "download_source": "soulseek", "output_formats": ["flac", "aiff"]})
         mock.patch.dict("os.environ", {"NICOTINE_DOWNLOAD_DIR": str(self.nic)}).start()
 
@@ -708,6 +711,56 @@ class PeerPolitenessTest(SyncFixture):
         self.assertEqual(soulseek.find_verification_requests(since=_t.time() + 10, logs_dir=logs), [], "only new ones")
         sent = [n for n in dir(soulseek) if "send" in n.lower() and "message" in n.lower()]
         self.assertEqual(sent, [], "sff has no way to send a private message at all")
+
+
+class FailureRecordTest(SyncFixture):
+    """What Soulseek could not supply is kept on disk, so it survives turning sff off."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-ghost", "Ghost Song", "Nobody", 0),
+                               spotify_track(0, "id-real", "Real Song", "Somebody", 1)]
+        self.nico.offer("Somebody", "Real Song", "flac16", "u1", "m/01 - Real Song.flac", {"4": 44100, "5": 16})
+
+    def saved(self):
+        return json.loads((self.tmp / "failed_tracks.json").read_text(encoding="utf-8"))
+
+    def test_a_failed_track_is_recorded_with_why(self):
+        self.run_sync()
+        rec = self.saved()
+        self.assertEqual(list(rec), ["id-ghost"], "only the failure, not the track that worked")
+        self.assertEqual(rec["id-ghost"]["category"], "no results")
+        self.assertEqual(rec["id-ghost"]["playlist"], "Deep tech AIFF")
+        self.assertEqual(rec["id-ghost"]["times_failed"], 1)
+        csv_text = (self.tmp / "failed_tracks.csv").read_text(encoding="utf-8-sig")
+        self.assertIn("Nobody Ghost Song", csv_text, "with ready-made search terms")
+
+    def test_failing_again_bumps_the_count_and_success_removes_it(self):
+        self.run_sync()
+        self.assertEqual(self.saved()["id-ghost"]["times_failed"], 1)
+        self.run_sync()
+        self.assertEqual(self.saved()["id-ghost"]["times_failed"], 2)
+        self.nico.offer("Nobody", "Ghost Song", "flac16", "u2", "m/02 - Ghost Song.flac", {"4": 44100, "5": 16})
+        self.run_sync()
+        self.assertEqual(self.saved(), {}, "found at last, so no longer on the list")
+
+
+class FlacWithoutAttributesTest(unittest.TestCase):
+    """A real '16BIT-WEB-FLAC' release came back with no bit depth and was rejected."""
+
+    def cand(self, attrs):
+        return soulseek._lossless_candidate({"file_path": r"x\02-joe_ariwa-skeldon_creek-rpo.flac", "file_attributes": attrs})
+
+    def test_a_flac_with_no_reported_depth_is_accepted_on_weaker_evidence(self):
+        self.assertEqual(self.cand({}), (soulseek.FORMAT_TIER[".flac"], 0))
+        self.assertEqual(self.cand({"5": 16}), (soulseek.FORMAT_TIER[".flac"], 1))
+
+    def test_a_reported_depth_below_16_is_still_ruled_out(self):
+        self.assertIsNone(self.cand({"5": 8}))
+
+    def test_a_reported_depth_is_preferred_over_none(self):
+        self.assertGreater(self.cand({"5": 24}), self.cand({}))
 
 
 class FormatHierarchyTest(SyncFixture):

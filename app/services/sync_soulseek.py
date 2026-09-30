@@ -24,7 +24,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from services import app_config, audio_formats, soulseek, tagging
+from services import app_config, audio_formats, failure_log, soulseek, tagging
 from services import rekordbox as rb
 
 logger = logging.getLogger(__name__)
@@ -268,6 +268,7 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
     # 3. FILE WORK
     progress.phase = "converting"
     planned = []
+    failures: list[dict] = []
     for sid, fmts in needed.items():
         track = track_by_id[sid]
         label = f"{track.artist} - {track.title}"
@@ -281,6 +282,11 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
             if not src:
                 progress.tracks_failed += len(fmts)
                 progress.errors.append(f"Soulseek: no source found for {label} -- {st.why_no_source() if st else 'never searched'}")
+                failures.append({"spotify_id": sid, "artist": track.artist, "title": track.title,
+                                 "playlist": variants[fmts[0]].display_name,
+                                 "category": st.failure_category() if st else "no results",
+                                 "detail": st.why_no_source() if st else "never searched",
+                                 "attempts": st.attempts if st else 0})
                 continue
             progress.tracks_downloaded += 1
             if src.suffix.lower() in audio_formats.LOSSLESS_EXTS:
@@ -319,6 +325,8 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
             if not tagging.write_tags(path, track, art, carry):
                 progress.errors.append(f"Could not write tags/cover for {label} ({fmt}); file kept as is")
             planned.append((sid, fmt, path))
+    # a persistent record, so the list of what Soulseek couldn't supply survives turning sff off
+    failure_log.record(failures, resolved_ids={sid for sid, _, _ in planned})
     return planned
 
 
