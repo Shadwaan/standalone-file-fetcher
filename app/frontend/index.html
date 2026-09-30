@@ -821,7 +821,7 @@
                     <li class="playlist-item">
                         <span class="playlist-name">${pl.display_name}</span>
                         <span class="playlist-meta">
-                            ${pl.track_count} tracks
+                            ${pl.track_count > 0 ? `<span title="Tracks the YouTube/MP3 sync had when it last ran for this playlist. The format badges show their own, separate counts.">MP3: ${pl.track_count} tracks (last synced)</span>` : ''}
                             ${formatBadges(pl, cfg)}
                             <button class="stop-btn" onclick="stopSyncing('${pl.id}', '${(pl.display_name || '').replace(/'/g, "\\'")}')">✕ Stop syncing</button>
                         </span>
