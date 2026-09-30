@@ -115,19 +115,49 @@ def get_status() -> dict:
 # ─── Nicotine+ API wrapper ──────────────────────────────────────────────────
 
 
+# Nicotine+ is a busy desktop app (its memory grew past 4 GB over a long session) and its
+# API now and then stalls for a moment: one "504 Gateway Timeout" on a search request used
+# to kill a sync that had been running for hours. Temporary failures are retried, with
+# growing pauses; anything else (a bad request, a 404) fails immediately as before.
+API_RETRY_DELAYS = (3, 10, 30, 60)
+API_TIMEOUT_SECONDS = 30
+_TRANSIENT_HTTP_CODES = {500, 502, 503, 504}
+
+
+def _with_retries(call):
+    for attempt in range(len(API_RETRY_DELAYS) + 1):
+        try:
+            return call()
+        except urllib.error.HTTPError as e:
+            if e.code not in _TRANSIENT_HTTP_CODES or attempt == len(API_RETRY_DELAYS):
+                raise
+            problem = f"HTTP {e.code}"
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == len(API_RETRY_DELAYS):
+                raise
+            problem = str(e)
+        logger.warning("Nicotine+ API hiccup (%s); retrying in %ds", problem, API_RETRY_DELAYS[attempt])
+        time.sleep(API_RETRY_DELAYS[attempt])
+
+
 def _api_get(path: str) -> dict:
-    with urllib.request.urlopen(f"{NICOTINE_API_BASE_URL}{path}", timeout=10) as r:
-        return json.loads(r.read().decode("utf-8"))
+    def call():
+        with urllib.request.urlopen(f"{NICOTINE_API_BASE_URL}{path}", timeout=API_TIMEOUT_SECONDS) as r:
+            return json.loads(r.read().decode("utf-8"))
+    return _with_retries(call)
 
 
 def _api_post(path: str, payload: dict) -> dict:
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{NICOTINE_API_BASE_URL}{path}", data=data,
-        headers={"Content-Type": "application/json"}, method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.loads(r.read().decode("utf-8"))
+
+    def call():
+        req = urllib.request.Request(
+            f"{NICOTINE_API_BASE_URL}{path}", data=data,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as r:
+            return json.loads(r.read().decode("utf-8"))
+    return _with_retries(call)
 
 
 def _fetch_all_results(token: int, max_offset: int = 4000) -> list[dict]:

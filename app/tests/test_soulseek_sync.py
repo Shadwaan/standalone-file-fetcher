@@ -610,6 +610,56 @@ class VersionGuardTest(unittest.TestCase):
         self.assertFalse(self.g(r"x\bicep - satisfy (some remix).flac", "Satisfy"))
 
 
+class ApiRetryTest(unittest.TestCase):
+    """A 504 from Nicotine+'s API once ended a multi-hour sync."""
+
+    class _Resp:
+        def __init__(self, body): self.body = body
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self.body
+
+    def http_error(self, code):
+        import urllib.error
+        return urllib.error.HTTPError("http://x", code, "err", {}, None)
+
+    def run_with(self, outcomes):
+        calls = []
+        def fake_urlopen(*a, **k):
+            calls.append(1)
+            o = outcomes[min(len(calls) - 1, len(outcomes) - 1)]
+            if isinstance(o, Exception):
+                raise o
+            return self._Resp(o)
+        sleeps = []
+        with mock.patch("urllib.request.urlopen", fake_urlopen), mock.patch("time.sleep", lambda s: sleeps.append(s)):
+            try:
+                result = soulseek._api_get("/x")
+            except Exception as e:
+                result = e
+        return result, len(calls), sleeps
+
+    def test_a_temporary_504_is_retried_until_it_works(self):
+        result, calls, sleeps = self.run_with([self.http_error(504), self.http_error(504), b'{"ok": true}'])
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual((calls, sleeps), (3, [3, 10]))
+
+    def test_a_dropped_connection_is_retried_too(self):
+        import urllib.error
+        result, calls, _ = self.run_with([urllib.error.URLError("connection reset"), b'{"ok": 1}'])
+        self.assertEqual((result, calls), ({"ok": 1}, 2))
+
+    def test_it_gives_up_after_the_last_delay(self):
+        result, calls, sleeps = self.run_with([self.http_error(504)])
+        self.assertIsInstance(result, Exception)
+        self.assertEqual(calls, len(soulseek.API_RETRY_DELAYS) + 1)
+
+    def test_a_real_error_is_not_retried(self):
+        result, calls, sleeps = self.run_with([self.http_error(400)])
+        self.assertIsInstance(result, Exception)
+        self.assertEqual((calls, sleeps), (1, []))
+
+
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""
 
