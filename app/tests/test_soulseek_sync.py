@@ -438,6 +438,39 @@ class NoDuplicateDownloadsTest(SyncFixture):
         self.assertTrue(flac.exists(), "the FLAC is left alone")
 
 
+class BadPeerTest(SyncFixture):
+    """A peer that stalls on several tracks is deprioritised for every track."""
+
+    def setUp(self):
+        super().setUp()
+        soulseek._peer_strikes.clear()
+        soulseek._peer_delivered.clear()
+        self.addCleanup(soulseek._peer_strikes.clear)
+        self.addCleanup(soulseek._peer_delivered.clear)
+        self.nico.offer("Artist Q", "Track Q", "flac16", "flaky", "a/01 - Track Q.flac", {"4": 44100, "5": 16}, free=True, speed=9000)
+        self.nico.offer("Artist Q", "Track Q", "wav16", "steady", "b/01 - Track Q.wav", {}, free=False, speed=10)
+
+    def best(self):
+        best, _ = soulseek.find_candidate("Artist Q", "Track Q", "lossless", set(), soulseek._avoided_peers())
+        return best["username"]
+
+    def test_a_peer_that_keeps_failing_is_ranked_below_working_ones(self):
+        self.assertEqual(self.best(), "flaky", "before any failures the better source wins")
+        soulseek._peer_strikes["flaky"] = soulseek.PEER_STRIKE_LIMIT
+        self.assertEqual(self.best(), "steady", "a working WAV beats a FLAC from a peer that keeps stalling")
+
+    def test_a_peer_that_has_delivered_is_never_penalised(self):
+        soulseek._peer_strikes["flaky"] = 10
+        soulseek._peer_delivered.add("flaky")
+        self.assertEqual(self.best(), "flaky")
+
+    def test_a_failing_peer_is_still_used_when_it_is_the_only_source(self):
+        self.nico.catalog.clear()
+        self.nico.offer("Artist Q", "Track Q", "flac16", "flaky", "a/01 - Track Q.flac", {"4": 44100, "5": 16})
+        soulseek._peer_strikes["flaky"] = 99
+        self.assertEqual(self.best(), "flaky", "slow beats nothing")
+
+
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""
 

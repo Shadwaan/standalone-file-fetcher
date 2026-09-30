@@ -347,12 +347,28 @@ def _has_title_match(items: list[dict], artist_full: str, title_main: str, title
                and passes_version_guard((i.get("file_path") or "").lower(), title_full) for i in items)
 
 
+# Peers that keep failing us. One uploader can hold dozens of our requests "Queued" and
+# never serve any of them (a real run had 91 of 113 queued requests on a single peer);
+# each track would otherwise have to find that out for itself, ~5 minutes at a time. A
+# peer that stalled or died on PEER_STRIKE_LIMIT different tracks, and never delivered
+# one, is ranked below every other source for ALL tracks. Ranked below, not excluded:
+# if it's the only source there is, slow beats nothing.
+PEER_STRIKE_LIMIT = 3
+_peer_strikes: dict[str, int] = {}
+_peer_delivered: set[str] = set()
+
+
+def _avoided_peers() -> set[str]:
+    return {u for u, n in _peer_strikes.items() if n >= PEER_STRIKE_LIMIT and u not in _peer_delivered}
+
+
 class SearchStats(NamedTuple):
     raw: int        # results the network returned
     matched: int    # ...of which are this exact title (right song, right version)
 
 
-def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str]) -> tuple[dict | None, SearchStats]:
+def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str],
+                   avoid_users: set[str] | None = None) -> tuple[dict | None, SearchStats]:
     """One search attempt. mode: 'lossless' (FLAC, WAV or AIFF) or 'mp3' (a genuine
     320kbps fallback). Returns (best candidate or None, SearchStats). The stats tell
     apart the three ways a search comes up empty: the network returned nothing (bad
@@ -367,6 +383,7 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
         # a title spelled as one word here may be two words in people's filenames
         items = items + _search(fallback)
 
+    avoid_users = avoid_users or set()
     cands = []
     matched = 0
     for it in items:
@@ -391,7 +408,8 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
 
     # Format tier first (FLAC > WAV = AIFF > MP3), then within a tier: a free upload
     # slot (no slot = it may never start), how much evidence the peer gives, speed, size.
-    cands.sort(key=lambda c: (c[1][0], bool(c[0].get("free_upload_slots")), c[1][1],
+    # A source that works beats a better format from a peer that keeps failing us.
+    cands.sort(key=lambda c: (c[0].get("username") not in avoid_users, c[1][0], bool(c[0].get("free_upload_slots")), c[1][1],
                               c[0].get("upload_speed") or 0, c[0].get("size") or 0), reverse=True)
     return (cands[0][0] if cands else None), SearchStats(len(items), matched)
 
@@ -607,7 +625,7 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
 
         if on_progress:
             on_progress(f"Searching Soulseek ({i + 1}/{len(tracks)}): {label}")
-        best, stats = find_candidate(track.artist, track.title, "lossless", set())
+        best, stats = find_candidate(track.artist, track.title, "lossless", set(), _avoided_peers())
         st.note_search(stats)
         if best:
             enqueue(best)
@@ -662,6 +680,7 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                     f = _saved_file(st.key[1], download_dir)
                     usable = bool(f) and validate(f)
                 if usable:
+                    _peer_delivered.add(st.key[0])
                     st.downloaded = True
                     st.resolved = True
                     if on_progress:
@@ -685,6 +704,8 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
 
             if st.key:
                 st.tried_users.add(st.key[0])
+                if not (status == "Finished"):          # it stalled or died, as opposed to sending junk
+                    _peer_strikes[st.key[0]] = _peer_strikes.get(st.key[0], 0) + 1
             st.attempts += 1
             if st.attempts > MAX_ATTEMPTS_PER_TRACK:
                 st.resolved = True
@@ -696,7 +717,7 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
             if mode == "lossless" and st.attempts > LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK:
                 mode = "mp3"
 
-            best, stats = find_candidate(st.track.artist, st.track.title, mode, st.tried_users)
+            best, stats = find_candidate(st.track.artist, st.track.title, mode, st.tried_users, _avoided_peers())
             st.note_search(stats)
             if not best:
                 st.mode = mode
