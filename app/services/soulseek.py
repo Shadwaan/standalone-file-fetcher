@@ -326,10 +326,25 @@ def _lossless_candidate(item: dict) -> tuple[int, int] | None:
     return None
 
 
+# Searches run concurrently: post a batch, wait ONCE, read them all. One at a time, each
+# costs SEARCH_WAIT_SECONDS, so a pass over ~60 tracks that need a new source took over
+# half an hour, and downloads sat idle for all of it.
+SEARCH_BATCH = 12
+
+
+def _search_many(queries: list[str]) -> list[list[dict]]:
+    out: list[list[dict]] = [[] for _ in queries]
+    for start in range(0, len(queries), SEARCH_BATCH):
+        tokens = [_api_post("/search", {"query": q, "mode": "global"})["token"]
+                  for q in queries[start:start + SEARCH_BATCH]]
+        time.sleep(SEARCH_WAIT_SECONDS)
+        for i, token in enumerate(tokens):
+            out[start + i] = _fetch_all_results(token)
+    return out
+
+
 def _search(query: str) -> list[dict]:
-    resp = _api_post("/search", {"query": query, "mode": "global"})
-    time.sleep(SEARCH_WAIT_SECONDS)
-    return _fetch_all_results(resp["token"])
+    return _search_many([query])[0]
 
 
 def _fallback_query(artist_full: str, title_main: str) -> str | None:
@@ -367,23 +382,46 @@ class SearchStats(NamedTuple):
     matched: int    # ...of which are this exact title (right song, right version)
 
 
+class SearchJob(NamedTuple):
+    artist: str
+    title: str
+    mode: str                       # 'lossless' (FLAC, WAV or AIFF) or 'mp3' (a genuine 320kbps fallback)
+    exclude: set                    # uploaders already tried for this track
+    avoid: set                      # uploaders that keep failing us: usable, but ranked last
+
+
+def find_candidates(jobs: list[SearchJob]) -> list[tuple[dict | None, SearchStats]]:
+    """One search attempt per job, all run concurrently. Returns (best candidate or None,
+    SearchStats) for each. The stats tell apart the three ways a search comes up empty: the
+    network returned nothing (bad luck), it returned results but none was this song
+    (usually our matching is too strict), or right-song files exist but none is usable
+    (wrong format, dead peers)."""
+    items = _search_many([_build_query(j.artist, j.title) for j in jobs])
+
+    # a title spelled as one word here may be two words in people's filenames
+    retry, retry_queries = [], []
+    for i, j in enumerate(jobs):
+        main = re.split(r"\s+-\s+", j.title, maxsplit=1)[0]
+        fallback = _fallback_query(j.artist, main)
+        if fallback and not _has_title_match(items[i], j.artist, main, j.title):
+            retry.append(i)
+            retry_queries.append(fallback)
+    if retry_queries:
+        for i, extra in zip(retry, _search_many(retry_queries)):
+            items[i] = items[i] + extra
+
+    return [_pick(j, items[i]) for i, j in enumerate(jobs)]
+
+
 def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str],
                    avoid_users: set[str] | None = None) -> tuple[dict | None, SearchStats]:
-    """One search attempt. mode: 'lossless' (FLAC, WAV or AIFF) or 'mp3' (a genuine
-    320kbps fallback). Returns (best candidate or None, SearchStats). The stats tell
-    apart the three ways a search comes up empty: the network returned nothing (bad
-    luck), it returned results but none was this song (usually our matching is too
-    strict), or right-song files exist but none is usable (wrong format, dead peers)."""
-    query = _build_query(artist_full, title_full)
+    """A single search attempt (see find_candidates)."""
+    return find_candidates([SearchJob(artist_full, title_full, mode, exclude_users, avoid_users or set())])[0]
+
+
+def _pick(job: SearchJob, items: list[dict]) -> tuple[dict | None, SearchStats]:
+    artist_full, title_full, mode = job.artist, job.title, job.mode
     title_main = re.split(r"\s+-\s+", title_full, maxsplit=1)[0]
-
-    items = _search(query)
-    fallback = _fallback_query(artist_full, title_main)
-    if fallback and not _has_title_match(items, artist_full, title_main, title_full):
-        # a title spelled as one word here may be two words in people's filenames
-        items = items + _search(fallback)
-
-    avoid_users = avoid_users or set()
     cands = []
     matched = 0
     for it in items:
@@ -393,7 +431,7 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
         if not passes_version_guard(fp.lower(), title_full):
             continue
         matched += 1
-        if it.get("username") in exclude_users:
+        if it.get("username") in job.exclude:
             continue
         attrs = it.get("file_attributes") or {}
         if mode == "lossless":
@@ -409,8 +447,8 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
     # Format tier first (FLAC > WAV = AIFF > MP3), then within a tier: a free upload
     # slot (no slot = it may never start), how much evidence the peer gives, speed, size.
     # A source that works beats a better format from a peer that keeps failing us.
-    cands.sort(key=lambda c: (c[0].get("username") not in avoid_users, c[1][0], bool(c[0].get("free_upload_slots")), c[1][1],
-                              c[0].get("upload_speed") or 0, c[0].get("size") or 0), reverse=True)
+    cands.sort(key=lambda c: (c[0].get("username") not in job.avoid, c[1][0], bool(c[0].get("free_upload_slots")),
+                              c[1][1], c[0].get("upload_speed") or 0, c[0].get("size") or 0), reverse=True)
     return (cands[0][0] if cands else None), SearchStats(len(items), matched)
 
 
@@ -602,6 +640,7 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
     claimed_live: set = set()
 
     states = {}
+    to_search: list[tuple] = []
     for i, track in enumerate(tracks):
         st = _TrackState(track)
         states[track.spotify_id] = st
@@ -623,13 +662,20 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
                 on_progress(f"Already queued in Nicotine+ ({i + 1}/{len(tracks)}): {label}")
             continue
 
+        to_search.append((track, st))
+
+    for start in range(0, len(to_search), SEARCH_BATCH):
+        chunk = to_search[start:start + SEARCH_BATCH]
         if on_progress:
-            on_progress(f"Searching Soulseek ({i + 1}/{len(tracks)}): {label}")
-        best, stats = find_candidate(track.artist, track.title, "lossless", set(), _avoided_peers())
-        st.note_search(stats)
-        if best:
-            enqueue(best)
-            st.key = (best["username"], best["file_path"])
+            on_progress(f"Searching Soulseek ({start + len(chunk)}/{len(to_search)}): "
+                        f"{chunk[0][0].artist} - {chunk[0][0].title} and {len(chunk) - 1} more")
+        avoid = _avoided_peers()
+        for (track, st), (best, stats) in zip(chunk, find_candidates(
+                [SearchJob(t.artist, t.title, "lossless", set(), avoid) for t, _ in chunk])):
+            st.note_search(stats)
+            if best:
+                enqueue(best)
+                st.key = (best["username"], best["file_path"])
     return states
 
 
@@ -663,6 +709,7 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
             key = (d.get("username"), d.get("virtual_path") or d.get("file_path"))
             by_key[key] = d
 
+        replacements: list[_TrackState] = []
         for st in states.values():
             if st.resolved:
                 continue
@@ -716,17 +763,21 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
             mode = st.mode
             if mode == "lossless" and st.attempts > LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK:
                 mode = "mp3"
-
-            best, stats = find_candidate(st.track.artist, st.track.title, mode, st.tried_users, _avoided_peers())
-            st.note_search(stats)
-            if not best:
-                st.mode = mode
-                continue
-
-            enqueue(best)
-            st.key = (best["username"], best["file_path"])
             st.mode = mode
-            st.history = []
+            replacements.append(st)
+
+        if replacements:
+            if on_progress:
+                on_progress(f"Finding new sources for {len(replacements)} tracks")
+            avoid = _avoided_peers()
+            found = find_candidates([SearchJob(st.track.artist, st.track.title, st.mode, set(st.tried_users), avoid)
+                                     for st in replacements])
+            for st, (best, stats) in zip(replacements, found):
+                st.note_search(stats)
+                if best:
+                    enqueue(best)
+                    st.key = (best["username"], best["file_path"])
+                    st.history = []
 
         resolved_count = sum(1 for s in states.values() if s.resolved)
         if on_progress:
