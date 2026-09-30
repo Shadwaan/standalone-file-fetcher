@@ -754,7 +754,10 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                 if not (status == "Finished"):          # it stalled or died, as opposed to sending junk
                     _peer_strikes[st.key[0]] = _peer_strikes.get(st.key[0], 0) + 1
             st.attempts += 1
-            if st.attempts > MAX_ATTEMPTS_PER_TRACK:
+            # Four searches (each also retried with a prefix query) and not one file of this
+            # song has ever shown up: more of the same, 90 seconds apart, only wastes time.
+            nothing_exists = st.key is None and st.attempts > LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK                 and st.max_matched == 0
+            if st.attempts > MAX_ATTEMPTS_PER_TRACK or nothing_exists:
                 st.resolved = True
                 if on_progress:
                     on_progress(f"Gave up: {st.track.artist} - {st.track.title} ({st.why_no_source()})")

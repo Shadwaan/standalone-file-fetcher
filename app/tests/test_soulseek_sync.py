@@ -471,6 +471,16 @@ class BadPeerTest(SyncFixture):
         self.assertEqual(self.best(), "flaky", "slow beats nothing")
 
 
+class GiveUpEarlyTest(SyncFixture):
+    def test_a_song_that_never_shows_up_is_abandoned_after_four_searches(self):
+        self.spotify_tracks = [spotify_track(0, "id-ghost", "Ghost Song", "Nobody", 0)]
+        app_config.set_output_formats(["aiff"])
+        result = self.run_sync()
+        query = soulseek._build_query("Nobody", "Ghost Song")
+        self.assertEqual(self.nico.searches.count(query), 5, "1 initial + 4 retries, not the full 8")
+        self.assertTrue(any("no results" in e for e in result["errors"]), result["errors"])
+
+
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""
 
