@@ -180,6 +180,7 @@ class SyncFixture(unittest.TestCase):
         self.rbfake = FakeRekordbox(self.events)
         for name, attr in [("_api_post", self.nico.api_post), ("_fetch_all_results", self.nico.fetch_all_results),
                            ("get_downloads", self.nico.get_downloads), ("enqueue", self.nico.enqueue),
+                           ("is_connected", lambda: True),
                            ("get_status", lambda: {"running": True, "api_reachable": True})]:
             mock.patch.object(soulseek, name, attr).start()
         mock.patch("time.sleep", lambda s: None).start()
@@ -479,6 +480,32 @@ class GiveUpEarlyTest(SyncFixture):
         query = soulseek._build_query("Nobody", "Ghost Song")
         self.assertEqual(self.nico.searches.count(query), 5, "1 initial + 4 retries, not the full 8")
         self.assertTrue(any("no results" in e for e in result["errors"]), result["errors"])
+
+
+class ConnectionGuardTest(SyncFixture):
+    """A Soulseek ban drops Nicotine+'s connection and every queued download reads
+    'User logged off'. That must pause the sync, not burn each track's retries."""
+
+    def test_waits_while_disconnected_instead_of_counting_it_as_a_dead_source(self):
+        states = iter([False, False, True])
+        polls = []
+        mock.patch.object(soulseek, "is_connected", lambda: (polls.append(1), next(states))[1]).start()
+        messages = []
+        self.assertTrue(soulseek.wait_until_connected(messages.append, max_wait=3600, poll=0))
+        self.assertEqual(len(polls), 3, "polled until it came back")
+        self.assertEqual(len(messages), 2, "and said so while waiting")
+
+    def test_gives_up_waiting_eventually(self):
+        mock.patch.object(soulseek, "is_connected", lambda: False).start()
+        self.assertFalse(soulseek.wait_until_connected(None, max_wait=0, poll=0))
+
+    def test_searches_are_spaced_out_not_fired_together(self):
+        sleeps = []
+        mock.patch("time.sleep", lambda s: sleeps.append(s)).start()
+        for q in ("a one", "b two", "c three"):
+            self.nico.catalog.setdefault(q, [])
+        soulseek._search_many(["a one", "b two", "c three"])
+        self.assertEqual(sleeps.count(soulseek.SEARCH_GAP_SECONDS), 2, "a gap between searches, none before the first")
 
 
 class FormatHierarchyTest(SyncFixture):

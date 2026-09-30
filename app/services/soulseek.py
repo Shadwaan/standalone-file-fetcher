@@ -326,21 +326,55 @@ def _lossless_candidate(item: dict) -> tuple[int, int] | None:
     return None
 
 
-# Searches run concurrently: post a batch, wait ONCE, read them all. One at a time, each
-# costs SEARCH_WAIT_SECONDS, so a pass over ~60 tracks that need a new source took over
-# half an hour, and downloads sat idle for all of it.
-SEARCH_BATCH = 12
+# Searches overlap: post a batch, wait ONCE, read them all. One at a time, each costs
+# SEARCH_WAIT_SECONDS, so a pass over ~60 tracks that need a new source took over half an
+# hour, and downloads sat idle for all of it.
+#
+# But the Soulseek server punishes searching too fast: 12 at once, batch after batch
+# (~0.5 searches/second sustained), got the account banned for 30 minutes ("too many
+# operations at once"), which drops the connection and kills every queued download. One
+# search per ~25s never did. So searches are posted SEARCH_GAP_SECONDS apart (~0.1/s):
+# still ~2x faster than sequential, and nowhere near the limit.
+SEARCH_BATCH = 8
+SEARCH_GAP_SECONDS = 10
 
 
 def _search_many(queries: list[str]) -> list[list[dict]]:
     out: list[list[dict]] = [[] for _ in queries]
     for start in range(0, len(queries), SEARCH_BATCH):
-        tokens = [_api_post("/search", {"query": q, "mode": "global"})["token"]
-                  for q in queries[start:start + SEARCH_BATCH]]
+        tokens = []
+        for k, q in enumerate(queries[start:start + SEARCH_BATCH]):
+            if k:
+                time.sleep(SEARCH_GAP_SECONDS)
+            tokens.append(_api_post("/search", {"query": q, "mode": "global"})["token"])
         time.sleep(SEARCH_WAIT_SECONDS)
         for i, token in enumerate(tokens):
             out[start + i] = _fetch_all_results(token)
     return out
+
+
+def is_connected() -> bool:
+    """Is Nicotine+ logged in to the Soulseek server? (Unknown counts as yes: this only
+    exists to stop retries being wasted while it's known to be offline.)"""
+    try:
+        return bool(_api_get("/status").get("connected", True))
+    except Exception:
+        return True
+
+
+def wait_until_connected(on_progress=None, max_wait: float = 3600, poll: float = 30) -> bool:
+    """Block while Nicotine+ is disconnected from Soulseek (a ban, a dropped connection).
+    Every queued transfer reads "User logged off" then, and treating that as a dead
+    source would burn a track's retries on nothing. False if it never came back."""
+    deadline = time.time() + max_wait
+    while not is_connected():
+        if on_progress:
+            on_progress("Nicotine+ is disconnected from Soulseek -- waiting for it to reconnect "
+                        "(open Nicotine+ and reconnect if it doesn't on its own)")
+        if time.time() >= deadline:
+            return False
+        time.sleep(poll)
+    return True
 
 
 def _search(query: str) -> list[dict]:
@@ -669,6 +703,7 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
         if on_progress:
             on_progress(f"Searching Soulseek ({start + len(chunk)}/{len(to_search)}): "
                         f"{chunk[0][0].artist} - {chunk[0][0].title} and {len(chunk) - 1} more")
+        wait_until_connected(on_progress)
         avoid = _avoided_peers()
         for (track, st), (best, stats) in zip(chunk, find_candidates(
                 [SearchJob(t.artist, t.title, "lossless", set(), avoid) for t, _ in chunk])):
@@ -703,6 +738,7 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
     start = time.time()
 
     while True:
+        wait_until_connected(on_progress)
         elapsed = time.time() - start
         by_key = {}
         for d in get_downloads(active_only=False):
