@@ -422,6 +422,21 @@ class NoDuplicateDownloadsTest(SyncFixture):
         self.assertEqual(self.nico.searches.count(self.query()), 1, "an MP3 can't stand in for lossless, so it searched")
         self.assertEqual(len(list(self.music.rglob("*.aiff"))), 1)
 
+    def test_a_full_playlist_in_one_format_becomes_another_without_downloading(self):
+        """The 'I already have it all as FLAC, now I want AIFF and WAV' case: a hand-made
+        FLAC playlist, sff has no record of it, and the filenames don't contain the artist."""
+        flac = self.tmp / "Hand made" / "01 - Xray.flac"
+        make_audio(flac, "flac16")
+        self.rbfake.add_existing_playlist("Deep tech FLAC", {"Track Xray": str(flac).replace("\\", "/")})
+        app_config.set_output_formats(["aiff", "wav"])
+        self.run_sync()
+        self.assertEqual(self.nico.searches, [], "converted from the FLAC playlist, nothing downloaded")
+        for ext in ("aiff", "wav"):
+            out = list(self.music.rglob(f"*.{ext}"))
+            self.assertEqual(len(out), 1, ext)
+            self.assertEqual(pcm_md5(out[0]), pcm_md5(flac), f"{ext} carries exactly the FLAC's audio")
+        self.assertTrue(flac.exists(), "the FLAC is left alone")
+
 
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""

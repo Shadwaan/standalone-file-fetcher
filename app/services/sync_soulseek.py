@@ -85,7 +85,8 @@ def _inspect_variant(pl_state: dict, fmt: str, base_name: str, tracks: list, cur
     return _Variant(fmt, v, v["display_name"], new_tracks, known_ids - current_ids)
 
 
-def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str]]) -> list[Path]:
+def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str]],
+                      siblings: dict[str, list[str]]) -> list[Path]:
     """Lossless files we ALREADY HAVE for this track, best first -- so it is never
     downloaded twice. Same idea as the YouTube path's dedup (Rekordbox library, then
     disk), with one difference: only lossless files count. An MP3 already in the
@@ -93,7 +94,10 @@ def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str
 
       1. what sff produced before, for this Spotify track in ANY playlist (the same
          track sitting in two playlists is one file, not two downloads)
-      2. the Rekordbox library, matched by title + artist -- catches files sff's own
+      2. the same playlist in another format ("Deep tech FLAC" when making "Deep tech
+         AIFF"), matched by title -- being in that playlist is enough evidence, even
+         when the file's name doesn't contain the artist
+      3. the Rekordbox library, matched by title + artist -- catches files sff's own
          state never heard of (built by hand, an older version, another tool)"""
     found: list[Path] = []
 
@@ -107,6 +111,9 @@ def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str
     for pl in playlists_state.values():
         for v in pl.get("variants", {}).values():
             consider((v.get("tracks", {}).get(track.spotify_id) or {}).get("file_path"))
+
+    for path_str in siblings.get(track.title, []):
+        consider(path_str)
 
     title = track.title.strip().lower()
     first_artist = track.artist.split(",")[0].strip().lower()
@@ -199,6 +206,11 @@ def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: st
     orch._wait_until_rekordbox_closed("checking what's already in your library")
     variants = {fmt: _inspect_variant(pl_state, fmt, base_name, tracks, current_ids) for fmt in formats}
     library = rb.get_library_files()
+    siblings: dict[str, list[str]] = {}          # title -> files in this playlist's other-format twins
+    for f in audio_formats.FORMATS.values():
+        twin = rb.find_playlist_id(f"{base_name} {f.label}")
+        for title, path in (rb.get_playlist_track_paths(twin) if twin else {}).items():
+            siblings.setdefault(title, []).append(path)
 
     needed: dict[str, list[str]] = {}      # spotify_id -> formats still missing for it
     for fmt in formats:
@@ -212,7 +224,7 @@ def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: st
             needed.setdefault(t.spotify_id, []).append(fmt)
 
     if needed or any(v.removed_ids for v in variants.values()):
-        planned = _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library)
+        planned = _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library, siblings)
         _write_to_rekordbox(orch, planned, variants, tracks)
 
     pl_state["name"], pl_state["display_name"] = pl_name, base_name
@@ -220,7 +232,7 @@ def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: st
     orch._save_state()      # after every playlist, so an interruption can't lose finished ones
 
 
-def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library):
+def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library, siblings):
     """Stages 2 and 3: get a source for each track that needs one, then convert
     and tag it into every format it's missing. Returns [(spotify_id, fmt, path)].
     Never touches Rekordbox."""
@@ -230,7 +242,7 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
         return []
 
     # 2. SOURCE -- reuse what we already have before going to Soulseek
-    existing = {sid: _existing_sources(orch._state["playlists"], track_by_id[sid], library) for sid in needed}
+    existing = {sid: _existing_sources(orch._state["playlists"], track_by_id[sid], library, siblings) for sid in needed}
     derived = {sid: found[0] for sid, found in existing.items() if found}
     to_download = [track_by_id[sid] for sid in needed if sid not in derived]
     states = {}
