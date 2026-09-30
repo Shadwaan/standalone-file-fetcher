@@ -711,6 +711,8 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
             if best:
                 enqueue(best)
                 st.key = (best["username"], best["file_path"])
+            logger.info("search 1: %s - %s -> %s (%d results, %d matching)", track.artist, track.title,
+                        f'{best["username"]}: {best["file_path"][-50:]}' if best else "nothing usable", stats.raw, stats.matched)
     return states
 
 
@@ -786,6 +788,7 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                 continue
 
             if st.key:
+                logger.info("replacing %s for %s - %s: status=%s", st.key[0], st.track.artist, st.track.title, status)
                 st.tried_users.add(st.key[0])
                 if not (status == "Finished"):          # it stalled or died, as opposed to sending junk
                     _peer_strikes[st.key[0]] = _peer_strikes.get(st.key[0], 0) + 1
@@ -795,6 +798,8 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
             nothing_exists = st.key is None and st.attempts > LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK                 and st.max_matched == 0
             if st.attempts > MAX_ATTEMPTS_PER_TRACK or nothing_exists:
                 st.resolved = True
+                logger.info("gave up on %s - %s after %d attempts: %s", st.track.artist, st.track.title,
+                            st.attempts, st.why_no_source())
                 if on_progress:
                     on_progress(f"Gave up: {st.track.artist} - {st.track.title} ({st.why_no_source()})")
                 continue
@@ -817,6 +822,10 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                     enqueue(best)
                     st.key = (best["username"], best["file_path"])
                     st.history = []
+                logger.info("attempt %d (%s): %s - %s -> %s (%d results, %d matching)", st.attempts, st.mode,
+                            st.track.artist, st.track.title,
+                            f'{best["username"]}: {best["file_path"][-50:]}' if best else "nothing usable",
+                            stats.raw, stats.matched)
 
         resolved_count = sum(1 for s in states.values() if s.resolved)
         if on_progress:
