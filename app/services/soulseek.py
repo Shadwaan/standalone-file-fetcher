@@ -43,6 +43,19 @@ LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK = 2
 # after this many searches, since more of the same 90 seconds apart only wastes time.
 GIVE_UP_IF_NOTHING_AFTER = 4
 
+# Patience with queues. A Soulseek download usually sits "Queued" on the uploader's side until
+# a slot frees up, which can take an hour or more; that is waiting, not failing (dropping a
+# source after ~4.5 minutes, as this used to, threw away downloads that would have arrived).
+# A queued source is kept for QUEUE_PATIENCE_SECONDS. If it is still waiting after
+# PARALLEL_AFTER_SECONDS a second source from a DIFFERENT peer is queued alongside it (up to
+# MAX_PARALLEL_SOURCES per track) and whichever finishes first wins. A request can't be
+# cancelled through the API, so the loser may still arrive later as a spare file in the
+# download folder: harmless, since the track is already done.
+QUEUE_PATIENCE_SECONDS = 45 * 60
+PARALLEL_AFTER_SECONDS = 8 * 60
+MAX_PARALLEL_SOURCES = 2
+EXTRA_SEARCH_EVERY_SECONDS = 10 * 60      # looking for a second source: at most this often per track
+
 DEAD_STATUSES = {
     "File not shared.", "User logged off", "Banned (banana)",
     "Connection timeout", "Overwhelmed with requests; try again later.",
@@ -728,15 +741,25 @@ def check_authenticity(path: Path) -> dict:
 # Per-track state used while resolving a whole playlist's worth of new tracks.
 
 
+class _Source:
+    """One queued/in-flight request for a track."""
+    __slots__ = ("since", "history")
+
+    def __init__(self, since: float):
+        self.since = since       # when we queued it
+        self.history = []        # recent progress readings, for stall detection once it is transferring
+
+
 class _TrackState:
-    __slots__ = ("track", "key", "mode", "history", "tried_users", "attempts", "resolved", "downloaded", "local_path",
-                 "max_raw", "max_matched", "max_blocked")
+    __slots__ = ("track", "key", "sources", "started", "mode", "tried_users", "attempts", "resolved", "downloaded",
+                 "local_path", "max_raw", "max_matched", "max_blocked", "next_extra_search")
 
     def __init__(self, track):
         self.track = track
-        self.key = None          # (username, file_path) currently queued
+        self.key = None          # (username, file_path): the request in flight, or the one that delivered
+        self.sources = {}        # (username, file_path) -> _Source, every request in flight for this track
+        self.started = 0         # requests ever queued for this track
         self.mode = "lossless"   # falls back to "mp3" after repeated failures
-        self.history = []        # recent progress_pct readings, for stall detection
         self.tried_users = set()
         self.attempts = 0
         self.resolved = False
@@ -745,6 +768,13 @@ class _TrackState:
         self.max_raw = 0         # best search so far: results returned / results that were this song
         self.max_matched = 0
         self.max_blocked = 0
+        self.next_extra_search = 0.0   # earliest time to look for a second source
+
+    def add_source(self, key: tuple, now: float | None = None) -> None:
+        self.sources[key] = _Source(time.time() if now is None else now)
+        self.started += 1
+        if self.key is None or self.key not in self.sources:
+            self.key = key
 
     def note_search(self, stats: SearchStats) -> None:
         self.max_raw = max(self.max_raw, stats.raw)
@@ -859,7 +889,7 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
 
         adopted = _match_live(track, live, claimed_live)
         if adopted:
-            st.key = (adopted["username"], adopted.get("virtual_path") or adopted.get("file_path"))
+            st.add_source((adopted["username"], adopted.get("virtual_path") or adopted.get("file_path")))
             if on_progress:
                 on_progress(f"Already queued in Nicotine+ ({i + 1}/{len(tracks)}): {label}")
             continue
@@ -878,7 +908,7 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
             st.note_search(stats)
             if best:
                 enqueue(best)
-                st.key = (best["username"], best["file_path"])
+                st.add_source((best["username"], best["file_path"]))
             logger.info("search 1: %s - %s -> %s (%d results, %d matching)", track.artist, track.title,
                         f'{best["username"]}: {best["file_path"][-50:]}' if best else "nothing usable", stats.raw, stats.matched)
     return states
@@ -897,10 +927,15 @@ def _saved_file(file_path: str, download_dir: str) -> Path | None:
 
 def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_seconds: float = 6 * 3600,
                 download_dir: str | None = None, validate=None, on_notice=None) -> None:
-    """Poll until every track is downloaded or given up: replaces stalled, dead or
-    unusable sources with a freshly verified alternative (excluding every uploader
-    already tried), falling back to a 320kbps MP3 only after several failed
-    lossless attempts. Mutates `states` in place.
+    """Poll until every track is downloaded or given up. Mutates `states` in place.
+
+    A source that is merely queued is waited for (see QUEUE_PATIENCE_SECONDS) and a second
+    source from another peer is started alongside it if the wait drags on; a source that is
+    dead ("File not shared", user offline), that stalls mid-transfer, or that turns out to be
+    unusable is dropped and replaced by a freshly verified alternative (excluding every
+    uploader already tried), falling back to a 320kbps MP3 only after several failed
+    lossless attempts. A track gives up once it has no source in flight and its attempts or
+    its prospects are used up.
 
     `validate(path) -> bool` (with `download_dir`) is the "is this finished file
     actually usable" gate: a WAV that turns out to be compressed, or not audio at
@@ -915,61 +950,81 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                 if req["user"] not in told:
                     told.add(req["user"])
                     on_notice(req)
-        elapsed = time.time() - start
+        now = time.time()
+        elapsed = now - start
         by_key = {}
         for d in get_downloads(active_only=False):
             key = (d.get("username"), d.get("virtual_path") or d.get("file_path"))
             by_key[key] = d
 
-        replacements: list[_TrackState] = []
+        searches: list[tuple[_TrackState, bool]] = []      # (track, True if it is only an EXTRA source)
         for st in states.values():
             if st.resolved:
                 continue
 
-            status, pct = None, 0
-            if st.key:
-                d = by_key.get(st.key)
+            winner = None
+            for key, src in list(st.sources.items()):
+                d = by_key.get(key)
                 status = d.get("status") if d else "NOT FOUND"
-                pct = d.get("progress_pct", 0) if d else 0
+                pct = (d.get("progress_pct") if d else 0) or 0
 
-            needs_replacement = False
-            if status == "Finished":
-                usable = True
-                if validate and download_dir:
-                    f = _saved_file(st.key[1], download_dir)
-                    usable = bool(f) and validate(f)
-                if usable:
-                    _peer_delivered.add(st.key[0])
-                    st.downloaded = True
-                    st.resolved = True
+                if status == "Finished":
+                    usable = True
+                    if validate and download_dir:
+                        f = _saved_file(key[1], download_dir)
+                        usable = bool(f) and validate(f)
+                    if usable:
+                        winner = key
+                        break
+                    logger.info("unusable download from %s for %s - %s", key[0], st.track.artist, st.track.title)
                     if on_progress:
-                        on_progress(f"Downloaded: {st.track.artist} - {st.track.title}")
+                        on_progress(f"Unusable download, trying another source: {st.track.artist} - {st.track.title}")
+                    del st.sources[key]
+                    st.tried_users.add(key[0])
                     continue
-                if on_progress:
-                    on_progress(f"Unusable download, trying another source: {st.track.artist} - {st.track.title}")
-                needs_replacement = True
-            elif st.key is None:
-                needs_replacement = True
-            elif status in DEAD_STATUSES or status == "NOT FOUND":
-                needs_replacement = True
-            else:
-                st.history.append(pct)
-                st.history = st.history[-STALL_POLLS:]
-                if len(st.history) == STALL_POLLS and len(set(st.history)) == 1:
-                    needs_replacement = True
 
-            if not needs_replacement:
+                dropped = None
+                if status in DEAD_STATUSES or status == "NOT FOUND":
+                    dropped = f"status={status}"
+                elif pct > 0:                                    # transferring: stalled if it stops moving
+                    src.history.append(pct)
+                    src.history = src.history[-STALL_POLLS:]
+                    if len(src.history) == STALL_POLLS and len(set(src.history)) == 1:
+                        dropped = "stalled mid-transfer"
+                elif now - src.since > QUEUE_PATIENCE_SECONDS:   # still waiting in the remote queue
+                    dropped = f"queued for {int((now - src.since) / 60)} min without starting"
+                if dropped:
+                    logger.info("dropping %s for %s - %s: %s", key[0], st.track.artist, st.track.title, dropped)
+                    del st.sources[key]
+                    st.tried_users.add(key[0])
+                    _peer_strikes[key[0]] = _peer_strikes.get(key[0], 0) + 1
+
+            if winner:
+                _peer_delivered.add(winner[0])
+                st.key = winner
+                st.downloaded = st.resolved = True
+                st.sources.clear()
+                if on_progress:
+                    on_progress(f"Downloaded: {st.track.artist} - {st.track.title}")
                 continue
 
-            if st.key:
-                logger.info("replacing %s for %s - %s: status=%s", st.key[0], st.track.artist, st.track.title, status)
-                st.tried_users.add(st.key[0])
-                if not (status == "Finished"):          # it stalled or died, as opposed to sending junk
-                    _peer_strikes[st.key[0]] = _peer_strikes.get(st.key[0], 0) + 1
+            if st.key not in st.sources:
+                st.key = next(iter(st.sources), None)
+
+            if st.sources:
+                # Something is in flight. Add a second, independent source if the wait drags on.
+                if (len(st.sources) < MAX_PARALLEL_SOURCES and st.started < MAX_ATTEMPTS_PER_TRACK
+                        and now >= st.next_extra_search
+                        and all(now - src.since > PARALLEL_AFTER_SECONDS for src in st.sources.values())):
+                    st.next_extra_search = now + EXTRA_SEARCH_EVERY_SECONDS
+                    searches.append((st, True))
+                continue
+
+            # Nothing in flight: this is an attempt.
             st.attempts += 1
             # Four searches (each also retried with a prefix query) and not one file of this
             # song has ever shown up: more of the same, 90 seconds apart, only wastes time.
-            nothing_exists = st.key is None and st.attempts >= GIVE_UP_IF_NOTHING_AFTER and st.max_matched == 0
+            nothing_exists = st.attempts >= GIVE_UP_IF_NOTHING_AFTER and st.max_matched == 0
             if st.attempts > MAX_ATTEMPTS_PER_TRACK or nothing_exists:
                 st.resolved = True
                 logger.info("gave up on %s - %s after %d attempts: %s", st.track.artist, st.track.title,
@@ -978,34 +1033,33 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                     on_progress(f"Gave up: {st.track.artist} - {st.track.title} ({st.why_no_source()})")
                 continue
 
-            mode = st.mode
-            if mode == "lossless" and st.attempts > LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK:
-                mode = "mp3"
-            st.mode = mode
-            replacements.append(st)
+            if st.mode == "lossless" and st.attempts > LOSSLESS_ATTEMPTS_BEFORE_MP3_FALLBACK:
+                st.mode = "mp3"
+            searches.append((st, False))
 
-        if replacements:
+        if searches:
             if on_progress:
-                on_progress(f"Finding new sources for {len(replacements)} tracks")
+                on_progress(f"Finding new sources for {len(searches)} tracks")
             avoid = _avoided_peers()
-            found = find_candidates([SearchJob(st.track.artist, st.track.title, st.mode, set(st.tried_users), avoid)
-                                     for st in replacements])
-            for st, (best, stats) in zip(replacements, found):
+            found = find_candidates([
+                SearchJob(st.track.artist, st.track.title, st.mode, set(st.tried_users) | {k[0] for k in st.sources}, avoid)
+                for st, _ in searches])
+            for (st, extra), (best, stats) in zip(searches, found):
                 st.note_search(stats)
-                if not best and stats.capped:
+                if not best and stats.capped and not extra:
                     st.attempts -= 1        # only busy peers had it: waiting for a slot, not a failure
                 if best:
                     enqueue(best)
-                    st.key = (best["username"], best["file_path"])
-                    st.history = []
-                logger.info("attempt %d (%s): %s - %s -> %s (%d results, %d matching)", st.attempts, st.mode,
+                    st.add_source((best["username"], best["file_path"]), now)
+                logger.info("%s %d (%s): %s - %s -> %s (%d results, %d matching)",
+                            "second source, attempt" if extra else "attempt", st.attempts, st.mode,
                             st.track.artist, st.track.title,
                             f'{best["username"]}: {best["file_path"][-50:]}' if best else "nothing usable",
                             stats.raw, stats.matched)
 
-        resolved_count = sum(1 for s in states.values() if s.resolved)
+        resolved_count = sum(1 for s_ in states.values() if s_.resolved)
         if on_progress:
-            downloaded_count = sum(1 for s in states.values() if s.downloaded)
+            downloaded_count = sum(1 for s_ in states.values() if s_.downloaded)
             on_progress(f"Soulseek: {downloaded_count}/{len(states)} downloaded, {resolved_count}/{len(states)} resolved")
 
         if resolved_count == len(states):

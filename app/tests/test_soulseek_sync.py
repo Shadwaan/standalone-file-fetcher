@@ -763,6 +763,115 @@ class FlacWithoutAttributesTest(unittest.TestCase):
         self.assertGreater(self.cand({"5": 24}), self.cand({}))
 
 
+class QueuePatienceTest(SyncFixture):
+    """A queued source is waited for, a second one is started if the wait drags on, and
+    a source is only abandoned after the full patience window. Time is faked."""
+
+    def setUp(self):
+        super().setUp()
+        self.now = 1_000_000.0
+        self.t0 = self.now
+        self.on_tick = lambda: None
+        mock.patch("time.time", lambda: self.now).start()
+        mock.patch("time.sleep", self._sleep).start()
+        self.queued = {}                                  # username -> item, requests that hold in "Queued"
+        mock.patch.object(soulseek, "enqueue", self._hold).start()
+
+    def _sleep(self, seconds):
+        self.now += seconds
+        self.on_tick()
+
+    def _hold(self, item):
+        self.queued[item["username"]] = item
+        self.nico.downloads.append({"username": item["username"], "virtual_path": item["file_path"],
+                                    "status": "Queued", "progress_pct": None})
+        return {"ok": True}
+
+    def release(self, user):
+        item = self.queued[user]
+        make_audio(self.nic / item["file_path"].replace("\\", "/").split("/")[-1], item["_kind"])
+        for d in self.nico.downloads:
+            if d["username"] == user:
+                d.update(status="Finished", progress_pct=100.0)
+
+    def minutes(self):
+        return (self.now - self.t0) / 60
+
+    def track(self):
+        return spotify_track(0, "id-q", "Track Q", "Artist Q", 0)
+
+    def run_track(self):
+        states = soulseek.search_and_queue_all([self.track()])
+        soulseek.resolve_all(states, download_dir=str(self.nic))
+        return states["id-q"]
+
+    def test_a_queued_source_is_waited_for_not_dropped_after_a_few_minutes(self):
+        self.nico.offer("Artist Q", "Track Q", "flac16", "slowpeer", "a/01 - Track Q.flac", {"4": 44100, "5": 16})
+        fired = []
+
+        def tick():
+            if not fired and self.minutes() >= 25:        # the old rule would have dropped it at ~4.5 min
+                fired.append(1)
+                self.release("slowpeer")
+        self.on_tick = tick
+        st = self.run_track()
+        self.assertTrue(st.downloaded)
+        self.assertEqual(st.key[0], "slowpeer")
+        searches = self.nico.searches.count(soulseek._build_query("Artist Q", "Track Q"))
+        self.assertLessEqual(searches, 4, "1 initial + a few looks for a second source, not one every poll")
+        self.assertEqual(st.attempts, 0, "waiting is not failing")
+
+    def test_a_second_source_is_started_when_the_wait_drags_on_and_the_first_is_kept(self):
+        self.nico.offer("Artist Q", "Track Q", "flac16", "stuckpeer", "a/01 - Track Q.flac", {"4": 44100, "5": 16}, free=True, speed=9000)
+        self.nico.offer("Artist Q", "Track Q", "flac16", "quickpeer", "b/01 - Track Q.flac", {"4": 44100, "5": 16}, free=False, speed=10)
+        fired = []
+
+        def tick():
+            if not fired and self.minutes() >= 14:
+                fired.append(1)
+                self.release("quickpeer")
+        self.on_tick = tick
+        st = self.run_track()
+        self.assertTrue(st.downloaded)
+        self.assertEqual(st.key[0], "quickpeer", "the second source won")
+        self.assertEqual(set(self.queued), {"stuckpeer", "quickpeer"}, "both were requested")
+        self.assertEqual(st.attempts, 0, "waiting is not failing")
+        stuck = [d for d in self.nico.downloads if d["username"] == "stuckpeer"][0]
+        self.assertEqual(stuck["status"], "Queued", "the first request was not touched")
+
+    def test_no_second_source_before_the_parallel_delay(self):
+        self.nico.offer("Artist Q", "Track Q", "flac16", "stuckpeer", "a/01 - Track Q.flac", {"4": 44100, "5": 16}, free=True)
+        self.nico.offer("Artist Q", "Track Q", "flac16", "quickpeer", "b/01 - Track Q.flac", {"4": 44100, "5": 16}, free=False)
+        fired = []
+
+        def tick():
+            if not fired and self.minutes() >= soulseek.PARALLEL_AFTER_SECONDS / 60 - 2:
+                fired.append(1)
+                self.release("stuckpeer")
+        self.on_tick = tick
+        st = self.run_track()
+        self.assertTrue(st.downloaded)
+        self.assertEqual(set(self.queued), {"stuckpeer"}, "it arrived before a second source was needed")
+
+    def test_a_source_is_only_abandoned_after_the_full_patience_window(self):
+        self.nico.offer("Artist Q", "Track Q", "flac16", "stuckpeer", "a/01 - Track Q.flac", {"4": 44100, "5": 16})
+        dropped_at = []
+
+        def tick():
+            st = states["id-q"]
+            if not st.sources and not dropped_at:
+                dropped_at.append(self.minutes())
+        states = soulseek.search_and_queue_all([self.track()])
+        self.on_tick = tick
+        soulseek.resolve_all(states, download_dir=str(self.nic))
+        st = states["id-q"]
+        self.assertFalse(st.downloaded)
+        self.assertTrue(st.resolved)
+        self.assertGreaterEqual(dropped_at[0], soulseek.QUEUE_PATIENCE_SECONDS / 60, "kept until the patience ran out")
+        self.assertEqual(soulseek._peer_strikes.get("stuckpeer"), 1)
+        soulseek._peer_strikes.clear()
+
+
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""
 
