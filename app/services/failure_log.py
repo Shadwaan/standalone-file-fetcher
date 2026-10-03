@@ -31,6 +31,32 @@ HINTS = {
 }
 
 
+# How long a failed track is left alone before sync searches for it again. Soulseek's answer
+# rarely changes within a day (a run re-searched the same 55 failed tracks for 70 minutes and
+# found nothing), and every repeat search is more load on the network and its users. Tracks
+# that failed because a source never delivered (queued, offline) are worth trying sooner.
+DEFAULT_COOLDOWN_HOURS = 24
+COOLDOWN_HOURS = {"source did not deliver": 6}
+
+
+def recently_failed(now: datetime | None = None) -> dict[str, dict]:
+    """{spotify_id: record} for tracks still inside their cooldown."""
+    now = now or datetime.now()
+    out = {}
+    for sid, rec in _load().items():
+        try:
+            age_hours = (now - datetime.fromisoformat(rec["last_failed"])).total_seconds() / 3600
+        except (KeyError, ValueError):
+            continue
+        if age_hours < COOLDOWN_HOURS.get(rec.get("category"), DEFAULT_COOLDOWN_HOURS):
+            out[sid] = rec
+    return out
+
+
+def all_failures() -> list[dict]:
+    return list(_load().values())
+
+
 def _load() -> dict:
     try:
         return json.loads(FILE.read_text(encoding="utf-8"))

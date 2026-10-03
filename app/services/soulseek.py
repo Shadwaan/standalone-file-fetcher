@@ -779,7 +779,7 @@ class _Source:
 
 class _TrackState:
     __slots__ = ("track", "key", "sources", "started", "mode", "tried_users", "attempts", "resolved", "downloaded",
-                 "local_path", "max_raw", "max_matched", "max_blocked", "next_extra_search", "capped_waits")
+                 "local_path", "max_raw", "max_matched", "max_blocked", "next_extra_search", "capped_waits", "deferred")
 
     def __init__(self, track):
         self.track = track
@@ -797,6 +797,7 @@ class _TrackState:
         self.max_blocked = 0
         self.next_extra_search = 0.0   # earliest time to look for a second source
         self.capped_waits = 0          # times the only sources were with peers already at their request limit
+        self.deferred = False          # left alone on purpose: it failed recently (see failure_log)
 
     def add_source(self, key: tuple, now: float | None = None) -> None:
         self.sources[key] = _Source(time.time() if now is None else now)
@@ -884,7 +885,7 @@ def _match_live(track, live: list[dict], claimed: set) -> dict | None:
 
 
 def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None = None,
-                         prefer_exts: set | None = None) -> dict[str, _TrackState]:
+                         prefer_exts: set | None = None, defer_ids=frozenset()) -> dict[str, _TrackState]:
     """First pass. For each track, reuse what Soulseek/Nicotine+ already gave us
     before spending a search on it:
       1. a matching lossless file already in the download folder -> done, no search
@@ -892,6 +893,9 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
          (the watchdog monitors it and replaces it if it stalls)
       3. otherwise search and queue a verified match.
     `prefer_exts` (e.g. {".flac", ".aiff"}) breaks ties toward a wanted container.
+    Tracks in `defer_ids` still get steps 1 and 2 (a file we already have costs nothing) but are
+    never searched for: they failed recently, and asking the network again would be the same
+    question. They come back with `deferred` set.
     Returns the per-track state the watchdog then polls."""
     prefer_exts = prefer_exts or set()
     local_files = _scan_local_lossless(local_dir)
@@ -922,6 +926,9 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
                 on_progress(f"Already queued in Nicotine+ ({i + 1}/{len(tracks)}): {label}")
             continue
 
+        if track.spotify_id in defer_ids:
+            st.deferred = st.resolved = True
+            continue
         to_search.append((track, st))
 
     for start in range(0, len(to_search), SEARCH_BATCH):

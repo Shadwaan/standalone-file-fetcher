@@ -191,6 +191,9 @@ def run_soulseek_sync(orch) -> dict:
         labels = "/".join(audio_formats.FORMATS[f].label for f in formats)
         progress.message = (f"{labels} sync complete: {progress.tracks_imported} imported, "
                             f"{progress.tracks_failed} failed, {progress.tracks_removed} removed from playlists")
+        if progress.tracks_deferred:
+            progress.message += (f". {progress.tracks_deferred} tracks were skipped because they failed recently "
+                                 f"-- press Retry failed to try them again")
         logger.info("=== %s ===", progress.message)
     finally:
         orch._save_state()
@@ -267,7 +270,10 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
         if "aiff" in formats:
             prefer.add(".aif")
         progress.phase = "searching"
-        states = soulseek.search_and_queue_all(to_download, on_progress=_cb, local_dir=nicotine_dir, prefer_exts=prefer)
+        # Tracks that failed recently are not searched for again (unless "Retry failed" was pressed).
+        cooling_down = set() if getattr(orch, "retry_recent_failures", False) else set(failure_log.recently_failed())
+        states = soulseek.search_and_queue_all(to_download, on_progress=_cb, local_dir=nicotine_dir, prefer_exts=prefer,
+                                               defer_ids=cooling_down)
         progress.phase = "downloading"
         def _notice(req):
             ask = f'reply "{req["phrase"]}"' if req["phrase"] else "reply to its message"
@@ -293,6 +299,10 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
         else:
             st = states.get(sid)
             src = soulseek.download_path_for(st, nicotine_dir) if st and st.downloaded else None
+            if not src and st and st.deferred:
+                progress.tracks_deferred += len(fmts)
+                logger.info("not searching again for %s: it failed recently", label)
+                continue
             if not src:
                 progress.tracks_failed += len(fmts)
                 progress.errors.append(f"Soulseek: no source found for {label} -- {st.why_no_source() if st else 'never searched'}")

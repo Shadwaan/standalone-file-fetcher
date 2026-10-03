@@ -751,10 +751,10 @@ class FailureRecordTest(SyncFixture):
     def test_failing_again_bumps_the_count_and_success_removes_it(self):
         self.run_sync()
         self.assertEqual(self.saved()["id-ghost"]["times_failed"], 1)
-        self.run_sync()
+        self.orchestrator().run_retry_failed()          # a plain sync would leave it alone for a day
         self.assertEqual(self.saved()["id-ghost"]["times_failed"], 2)
         self.nico.offer("Nobody", "Ghost Song", "flac16", "u2", "m/02 - Ghost Song.flac", {"4": 44100, "5": 16})
-        self.run_sync()
+        self.orchestrator().run_retry_failed()
         self.assertEqual(self.saved(), {}, "found at last, so no longer on the list")
 
 
@@ -918,6 +918,65 @@ class FakeMp3320Test(SyncFixture):
         self.assertEqual(self.rbfake.imports, [])
         self.assertEqual(result["tracks_failed"], 1)
         self.assertEqual(list(self.music.rglob("*.mp3")), [])
+
+
+class FailureCooldownTest(SyncFixture):
+    """A track that failed recently is not searched for again, unless asked."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-ghost", "Ghost Song", "Nobody", 0),
+                               spotify_track(0, "id-real", "Real Song", "Somebody", 1)]
+        self.nico.offer("Somebody", "Real Song", "flac16", "u1", "m/01 - Real Song.flac", {"4": 44100, "5": 16})
+        self.ghost_query = soulseek._build_query("Nobody", "Ghost Song")
+
+    def saved(self):
+        return json.loads((self.tmp / "failed_tracks.json").read_text(encoding="utf-8"))
+
+    def test_a_recent_failure_is_not_searched_for_again(self):
+        self.run_sync()
+        first = self.nico.searches.count(self.ghost_query)
+        self.assertGreater(first, 0)
+        result = self.orchestrator().run_sync()
+        self.assertEqual(self.nico.searches.count(self.ghost_query), first, "no new searches for it")
+        self.assertEqual(result["tracks_deferred"], 1)
+        self.assertEqual(result["tracks_failed"], 0, "skipped on purpose is not a new failure")
+        self.assertEqual(self.saved()["id-ghost"]["times_failed"], 1, "and the cooldown is not restarted by being skipped")
+        self.assertIn("failed recently", result["message"])
+
+    def test_retry_ignores_the_cooldown(self):
+        self.run_sync()
+        first = self.nico.searches.count(self.ghost_query)
+        orch = self.orchestrator()
+        result = orch.run_retry_failed()
+        self.assertGreater(self.nico.searches.count(self.ghost_query), first, "it searched again")
+        self.assertEqual(result["tracks_deferred"], 0)
+        self.assertEqual(self.saved()["id-ghost"]["times_failed"], 2)
+
+    def test_the_cooldown_expires(self):
+        self.run_sync()
+        data = self.saved()
+        data["id-ghost"]["last_failed"] = "2000-01-01T00:00:00"
+        (self.tmp / "failed_tracks.json").write_text(json.dumps(data), encoding="utf-8")
+        first = self.nico.searches.count(self.ghost_query)
+        self.run_sync()
+        self.assertGreater(self.nico.searches.count(self.ghost_query), first)
+
+    def test_a_track_whose_file_turned_up_is_still_picked_up_during_its_cooldown(self):
+        self.run_sync()
+        make_audio(self.nic / "01 - Ghost Song.flac", "flac16")        # it arrived some other way
+        result = self.orchestrator().run_sync()
+        self.assertEqual(result["tracks_deferred"], 0)
+        self.assertEqual(len(list(self.music.rglob("*Ghost*.aiff"))), 1)
+
+    def test_failed_tracks_show_up_for_the_retry_button(self):
+        self.run_sync()
+        pending = self.orchestrator().get_progress()["failed_pending"]
+        self.assertEqual([(p["artist"], p["title"]) for p in pending], [("Nobody", "Ghost Song")])
+
+    def test_the_slower_cooldown_applies_to_no_results_the_shorter_to_non_delivery(self):
+        self.assertLess(failure_log.COOLDOWN_HOURS["source did not deliver"], failure_log.DEFAULT_COOLDOWN_HOURS)
 
 
 class FlacWithoutAttributesTest(unittest.TestCase):

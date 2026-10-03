@@ -41,6 +41,7 @@ class SyncProgress:
     tracks_skipped: int = 0
     tracks_failed: int = 0
     tracks_removed: int = 0
+    tracks_deferred: int = 0      # Soulseek tracks left alone because they failed recently
     errors: list[str] = field(default_factory=list)
     started_at: str = ""
     finished_at: str = ""
@@ -102,6 +103,7 @@ class SyncOrchestrator:
             "tracks_skipped": self.progress.tracks_skipped,
             "tracks_failed": self.progress.tracks_failed,
             "tracks_removed": self.progress.tracks_removed,
+            "tracks_deferred": self.progress.tracks_deferred,
             "errors": self.progress.errors,
             "started_at": self.progress.started_at,
             "finished_at": self.progress.finished_at,
@@ -115,15 +117,30 @@ class SyncOrchestrator:
                     "attempts": f.get("attempts", 1),
                 }
                 for f in self._state.get("failed", {}).values()
-            ],
+            ] + self._soulseek_failures(),
         }
+
+    def _soulseek_failures(self) -> list[dict]:
+        """Tracks Soulseek could not supply, for the "Retry failed" button (Soulseek source only)."""
+        if app_config.get_download_source() != "soulseek":
+            return []
+        from services import failure_log
+        return [{"artist": f.get("artist", ""), "title": f.get("title", ""), "playlist": f.get("playlist", ""),
+                 "attempts": f.get("times_failed", 1)} for f in failure_log.all_failures()]
 
     def run_sync(self) -> dict:
         """Run a full sync cycle."""
         return self._run(self._do_sync, full_sync=True)
 
     def run_retry_failed(self) -> dict:
-        """Re-attempt only the tracks whose download failed in earlier runs."""
+        """Re-attempt only the tracks whose download failed in earlier runs. With Soulseek as the
+        source that is a normal sync that ignores the "failed recently, leave it alone" cooldown."""
+        if app_config.get_download_source() == "soulseek":
+            self.retry_recent_failures = True
+            try:
+                return self._run(self._do_sync_soulseek, full_sync=True)
+            finally:
+                self.retry_recent_failures = False
         return self._run(self._do_retry_failed, full_sync=False)
 
     def _run(self, job, full_sync: bool) -> dict:
