@@ -21,6 +21,8 @@ sys.path.insert(0, str(APP))
 from models.track import TrackInfo  # noqa: E402
 from services import app_config, audio_formats, failure_log, soulseek, source_log, sync, tagging  # noqa: E402
 from services import rekordbox as rb  # noqa: E402
+
+REAL_ENQUEUE = soulseek.enqueue          # before any fixture replaces it with a fake
 import mutagen  # noqa: E402
 
 
@@ -787,6 +789,61 @@ class SourceRecordTest(SyncFixture):
     def test_top_users_counts_deliveries(self):
         self.run_sync()
         self.assertEqual(source_log.top_users(), [("goodpeer", 2)], "one file, in two playlists")
+
+
+class HourlyPeerLimitTest(SyncFixture):
+    """No peer gets a flood of requests, even one at a time."""
+
+    def setUp(self):
+        super().setUp()
+        soulseek._request_times.clear()
+        self.addCleanup(soulseek._request_times.clear)
+        self.now = 5_000_000.0
+        mock.patch("time.time", lambda: self.now).start()
+        # the REAL enqueue (it is what records each request), talking to a fake API
+        mock.patch.object(soulseek, "_api_post", lambda path, payload: {"ok": True} if path == "/downloads/enqueue"
+                          else self.nico.api_post(path, payload)).start()
+        mock.patch.object(soulseek, "get_downloads", lambda active_only=False: []).start()   # nothing open at once
+        for i in range(soulseek.MAX_REQUESTS_PER_PEER_PER_HOUR + 5):
+            self.nico.offer("Artist P", f"Song {i}", "flac16", "bulkpeer", f"m/{i} - Song {i}.flac", {"4": 44100, "5": 16})
+
+    def request(self, i):
+        best, stats = soulseek.find_candidate("Artist P", f"Song {i}", "lossless", set())
+        if best:
+            REAL_ENQUEUE(best)
+        return best, stats
+
+    def test_requests_to_one_peer_stop_at_the_hourly_limit_then_resume(self):
+        picked = [self.request(i)[0] for i in range(soulseek.MAX_REQUESTS_PER_PEER_PER_HOUR + 3)]
+        self.assertEqual(sum(1 for b in picked if b), soulseek.MAX_REQUESTS_PER_PEER_PER_HOUR)
+        best, stats = self.request(soulseek.MAX_REQUESTS_PER_PEER_PER_HOUR + 4)
+        self.assertIsNone(best)
+        self.assertEqual(stats.capped, 1, "held back, not a failure")
+        self.now += 3601
+        self.assertIsNotNone(self.request(soulseek.MAX_REQUESTS_PER_PEER_PER_HOUR + 4)[0], "an hour later it is fine again")
+
+    def test_another_peer_is_unaffected(self):
+        for i in range(soulseek.MAX_REQUESTS_PER_PEER_PER_HOUR):
+            self.request(i)
+        self.nico.offer("Artist P", "Song 0", "wav16", "otherpeer", "x/Song 0.wav", {})
+        best, _ = soulseek.find_candidate("Artist P", "Song 0", "lossless", set())
+        self.assertEqual(best["username"], "otherpeer")
+
+
+class UploaderReportTest(unittest.TestCase):
+    def test_summary_groups_uploaders_per_playlist_and_counts_each_track_once(self):
+        tmp = Path(tempfile.mkdtemp())
+        with mock.patch.object(source_log, "FILE", tmp / "download_sources.csv"):
+            def row(playlist, title, user, path="share/Dub Album/01 - x.flac", how="downloaded"):
+                return {"playlist": playlist, "artist": "A", "title": title, "from_user": user, "remote_path": path, "how": how}
+            source_log.record([row("Dub AIFF", "t1", "dubguy"), row("Dub WAV", "t1", "dubguy"),     # same track, two formats
+                               row("Dub AIFF", "t2", "dubguy"), row("Dub AIFF", "t3", "otherguy"),
+                               row("Dub AIFF", "t4", "", how="made from a file we already had"),
+                               row("Deep tech AIFF", "t5", "otherguy")])
+            import csv
+            with (tmp / "download_sources_by_playlist.csv").open(newline="", encoding="utf-8-sig") as fh:
+                out = [(r["playlist"], r["uploader"], r["tracks_supplied"]) for r in csv.DictReader(fh)]
+        self.assertEqual(out, [("Deep tech", "otherguy", "1"), ("Dub", "dubguy", "2"), ("Dub", "otherguy", "1")])
 
 
 class FlacWithoutAttributesTest(unittest.TestCase):

@@ -191,6 +191,7 @@ def get_downloads(active_only: bool = False) -> list[dict]:
 
 
 def enqueue(item: dict) -> dict:
+    _request_times.setdefault(item.get("username"), []).append(time.time())
     attrs = item.get("file_attributes") or {}
     return _api_post("/downloads/enqueue", {
         "username": item.get("username"), "virtual_path": item.get("file_path"),
@@ -505,6 +506,23 @@ class SearchStats(NamedTuple):
 # is not counted as a failed attempt).
 MAX_ACTIVE_PER_PEER = 3
 
+# ...and over time: even one request at a time, sixty requests to the same person in an hour is
+# a flood. At most this many NEW requests go to any one peer per hour (a peer with a big
+# collection of what you like still gets used, just at a human pace). Beyond it, the track
+# waits or takes another source; the wait is not counted as a failed attempt.
+MAX_REQUESTS_PER_PEER_PER_HOUR = 20
+_request_times: dict[str, list[float]] = {}
+
+
+def _requests_in_the_last_hour() -> dict[str, int]:
+    cutoff = time.time() - 3600
+    out = {}
+    for user, times in _request_times.items():
+        times[:] = [t for t in times if t > cutoff]
+        if times:
+            out[user] = len(times)
+    return out
+
 
 def _active_requests_per_peer() -> dict[str, int]:
     counts: dict[str, int] = {}
@@ -566,7 +584,8 @@ def find_candidates(jobs: list[SearchJob]) -> list[tuple[dict | None, SearchStat
 
     blocked = _unretriable_keys()
     busy = _active_requests_per_peer()
-    return [_pick(j, items[i], blocked, busy) for i, j in enumerate(jobs)]
+    hourly = _requests_in_the_last_hour()
+    return [_pick(j, items[i], blocked, busy, hourly) for i, j in enumerate(jobs)]
 
 
 def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: set[str],
@@ -575,7 +594,8 @@ def find_candidate(artist_full: str, title_full: str, mode: str, exclude_users: 
     return find_candidates([SearchJob(artist_full, title_full, mode, exclude_users, avoid_users or set())])[0]
 
 
-def _pick(job: SearchJob, items: list[dict], blocked: set, busy: dict) -> tuple[dict | None, SearchStats]:
+def _pick(job: SearchJob, items: list[dict], blocked: set, busy: dict,
+          hourly: dict) -> tuple[dict | None, SearchStats]:
     artist_full, title_full, mode = job.artist, job.title, job.mode
     title_main = re.split(r"\s+-\s+", title_full, maxsplit=1)[0]
     cands = []
@@ -592,7 +612,8 @@ def _pick(job: SearchJob, items: list[dict], blocked: set, busy: dict) -> tuple[
         if (it.get("username"), fp) in blocked:
             blocked_count += 1
             continue
-        if busy.get(it.get("username"), 0) >= MAX_ACTIVE_PER_PEER:
+        if (busy.get(it.get("username"), 0) >= MAX_ACTIVE_PER_PEER
+                or hourly.get(it.get("username"), 0) >= MAX_REQUESTS_PER_PEER_PER_HOUR):
             capped_count += 1
             continue
         attrs = it.get("file_attributes") or {}
@@ -611,6 +632,7 @@ def _pick(job: SearchJob, items: list[dict], blocked: set, busy: dict) -> tuple[
     best = cands[0][0] if cands else None
     if best is not None:
         busy[best.get("username")] = busy.get(best.get("username"), 0) + 1     # counts for the next job in this batch
+        hourly[best.get("username")] = hourly.get(best.get("username"), 0) + 1
     return best, SearchStats(len(items), matched, blocked_count, capped_count)
 
 

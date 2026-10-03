@@ -6,6 +6,7 @@ uploaders are reliable and where a doubtful file came from.
 """
 import csv
 import logging
+import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ def record(rows: list[dict]) -> None:
                             r.get("from_user", ""), r.get("remote_path", ""), r.get("how", "")])
     except OSError as e:
         logger.warning("Could not save the download-sources record: %s", e)
+    write_summary()
 
 
 def top_users(limit: int = 10) -> list[tuple[str, int]]:
@@ -41,3 +43,37 @@ def top_users(limit: int = 10) -> list[tuple[str, int]]:
             return Counter(r["from_user"] for r in csv.DictReader(fh) if r.get("from_user")).most_common(limit)
     except OSError:
         return []
+
+
+_FORMAT_SUFFIX = re.compile(r"\s+(AIFF|WAV|FLAC)$", re.IGNORECASE)
+
+
+def write_summary() -> None:
+    """`download_sources_by_playlist.csv`: for each playlist, which uploaders supplied the most
+    tracks, with the folder one of them came from. Genre-focused uploaders stand out, which is
+    where to look (Browse Files in Nicotine+) for more of the same."""
+    try:
+        with FILE.open(newline="", encoding="utf-8-sig") as fh:
+            rows = [r for r in csv.DictReader(fh) if r.get("from_user") and r.get("how") == "downloaded"]
+    except OSError:
+        return
+    # one count per (playlist, user, track): the same file in a WAV and an AIFF playlist is one delivery
+    seen, counts, example = set(), {}, {}
+    for r in rows:
+        playlist = _FORMAT_SUFFIX.sub("", r["playlist"])
+        ident = (playlist, r["from_user"], r["artist"].lower(), r["title"].lower())
+        if ident in seen:
+            continue
+        seen.add(ident)
+        key = (playlist, r["from_user"])
+        counts[key] = counts.get(key, 0) + 1
+        folder = re.split(r"[\\/]", r["remote_path"])[:-1]
+        example.setdefault(key, "\\".join(folder[-2:]))
+    try:
+        with FILE.with_name("download_sources_by_playlist.csv").open("w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.writer(fh)
+            w.writerow(["playlist", "uploader", "tracks_supplied", "an_example_folder"])
+            for (playlist, user), n in sorted(counts.items(), key=lambda kv: (kv[0][0], -kv[1], kv[0][1])):
+                w.writerow([playlist, user, n, example[(playlist, user)]])
+    except OSError as e:
+        logger.warning("Could not save the uploaders-by-playlist report: %s", e)
