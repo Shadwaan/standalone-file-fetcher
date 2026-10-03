@@ -24,7 +24,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from services import app_config, audio_formats, failure_log, soulseek, tagging
+from services import app_config, audio_formats, failure_log, soulseek, source_log, tagging
 from services import rekordbox as rb
 
 logger = logging.getLogger(__name__)
@@ -224,15 +224,16 @@ def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: st
             needed.setdefault(t.spotify_id, []).append(fmt)
 
     if needed or any(v.removed_ids for v in variants.values()):
-        planned = _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library, siblings)
-        _write_to_rekordbox(orch, planned, variants, tracks)
+        sources: dict = {}
+        planned = _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library, siblings, sources)
+        _write_to_rekordbox(orch, planned, variants, tracks, sources)
 
     pl_state["name"], pl_state["display_name"] = pl_name, base_name
     pl_state["snapshot_id"] = pl.get("snapshot_id", "")
     orch._save_state()      # after every playlist, so an interruption can't lose finished ones
 
 
-def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library, siblings):
+def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_dir, library, siblings, sources):
     """Stages 2 and 3: get a source for each track that needs one, then convert
     and tag it into every format it's missing. Returns [(spotify_id, fmt, path)].
     Never touches Rekordbox."""
@@ -276,6 +277,7 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
 
         if keep_source:
             src = derived[sid]
+            sources[sid] = {"user": "", "remote_path": str(src), "how": "made from a file we already had"}
         else:
             st = states.get(sid)
             src = soulseek.download_path_for(st, nicotine_dir) if st and st.downloaded else None
@@ -289,6 +291,12 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
                                  "attempts": st.attempts if st else 0})
                 continue
             progress.tracks_downloaded += 1
+            user, remote = st.key if st and st.key else (None, None)
+            if user:
+                sources[sid] = {"user": user, "remote_path": remote, "how": "downloaded"}
+                logger.info("downloaded %s from %s: %s", label, user, remote)
+            else:
+                sources[sid] = {"user": "", "remote_path": str(src), "how": "already in the Nicotine+ download folder"}
             if src.suffix.lower() in audio_formats.LOSSLESS_EXTS:
                 auth = soulseek.check_authenticity(src)        # on the file as downloaded
                 if auth["suspect"]:
@@ -325,12 +333,17 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
             if not tagging.write_tags(path, track, art, carry):
                 progress.errors.append(f"Could not write tags/cover for {label} ({fmt}); file kept as is")
             planned.append((sid, fmt, path))
-    # a persistent record, so the list of what Soulseek couldn't supply survives turning sff off
+    # persistent records, so what Soulseek couldn't supply, and who supplied the rest, survive turning sff off
     failure_log.record(failures, resolved_ids={sid for sid, _, _ in planned})
+    source_log.record([
+        {"playlist": variants[fmt].display_name, "artist": track_by_id[sid].artist, "title": track_by_id[sid].title,
+         "from_user": sources.get(sid, {}).get("user", ""), "remote_path": sources.get(sid, {}).get("remote_path", ""),
+         "how": sources.get(sid, {}).get("how", "")}
+        for sid, fmt, _ in planned if sid in sources])
     return planned
 
 
-def _write_to_rekordbox(orch, planned, variants, tracks) -> None:
+def _write_to_rekordbox(orch, planned, variants, tracks, sources) -> None:
     """Stage 4: the only place that writes to Rekordbox."""
     progress = orch.progress
     if not planned and not any(v.removed_ids for v in variants.values()):
@@ -367,6 +380,8 @@ def _write_to_rekordbox(orch, planned, variants, tracks) -> None:
                     "filename": path.name, "file_path": file_path,
                     "artist": track.artist, "title": track.title,
                 }
+                if sid in sources:
+                    v.state["tracks"][sid]["source"] = sources[sid]
             else:
                 progress.tracks_failed += 1
                 progress.errors.append(f"Rekordbox import failed: {track.artist} - {track.title} ({fmt})")

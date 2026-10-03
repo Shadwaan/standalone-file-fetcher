@@ -19,7 +19,7 @@ APP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP))
 
 from models.track import TrackInfo  # noqa: E402
-from services import app_config, audio_formats, failure_log, soulseek, sync, tagging  # noqa: E402
+from services import app_config, audio_formats, failure_log, soulseek, source_log, sync, tagging  # noqa: E402
 from services import rekordbox as rb  # noqa: E402
 import mutagen  # noqa: E402
 
@@ -176,6 +176,7 @@ class SyncFixture(unittest.TestCase):
         mock.patch.object(sync, "STATE_FILE", self.tmp / "sync_state.json").start()
         mock.patch.object(failure_log, "FILE", self.tmp / "failed_tracks.json").start()
         mock.patch.object(failure_log, "CSV_FILE", self.tmp / "failed_tracks.csv").start()
+        mock.patch.object(source_log, "FILE", self.tmp / "download_sources.csv").start()
         app_config.save({"music_folder": str(self.music), "download_source": "soulseek", "output_formats": ["flac", "aiff"]})
         mock.patch.dict("os.environ", {"NICOTINE_DOWNLOAD_DIR": str(self.nic)}).start()
 
@@ -744,6 +745,48 @@ class FailureRecordTest(SyncFixture):
         self.nico.offer("Nobody", "Ghost Song", "flac16", "u2", "m/02 - Ghost Song.flac", {"4": 44100, "5": 16})
         self.run_sync()
         self.assertEqual(self.saved(), {}, "found at last, so no longer on the list")
+
+
+class SourceRecordTest(SyncFixture):
+    """Which Soulseek user sent each file is kept, in the log, the CSV and the saved state."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff", "wav"])
+        self.spotify_tracks = [spotify_track(0, "id-real", "Real Song", "Somebody", 0)]
+        self.nico.offer("Somebody", "Real Song", "flac16", "goodpeer", "share/Real Album/01 - Real Song.flac",
+                        {"4": 44100, "5": 16})
+
+    def rows(self):
+        import csv
+        with (self.tmp / "download_sources.csv").open(newline="", encoding="utf-8-sig") as fh:
+            return list(csv.DictReader(fh))
+
+    def test_the_uploader_is_recorded_for_every_playlist_the_file_lands_in(self):
+        self.run_sync()
+        rows = self.rows()
+        self.assertEqual({r["playlist"] for r in rows}, {"Deep tech AIFF", "Deep tech WAV"})
+        for r in rows:
+            self.assertEqual((r["from_user"], r["title"], r["how"]), ("goodpeer", "Real Song", "downloaded"))
+            self.assertTrue(r["remote_path"].endswith("01 - Real Song.flac"))
+
+    def test_the_saved_state_remembers_it_too(self):
+        self.run_sync()
+        state = json.loads((self.tmp / "sync_state.json").read_text(encoding="utf-8"))
+        track = next(iter(next(iter(state["playlists"].values()))["variants"]["aiff"]["tracks"].values()))
+        self.assertEqual(track["source"]["user"], "goodpeer")
+
+    def test_a_format_made_from_an_existing_file_says_so_and_names_no_user(self):
+        self.run_sync()
+        app_config.set_output_formats(["aiff", "wav", "flac"])
+        self.run_sync()
+        derived = [r for r in self.rows() if r["playlist"] == "Deep tech FLAC"]
+        self.assertEqual(len(derived), 1)
+        self.assertEqual((derived[0]["from_user"], derived[0]["how"]), ("", "made from a file we already had"))
+
+    def test_top_users_counts_deliveries(self):
+        self.run_sync()
+        self.assertEqual(source_log.top_users(), [("goodpeer", 2)], "one file, in two playlists")
 
 
 class FlacWithoutAttributesTest(unittest.TestCase):
