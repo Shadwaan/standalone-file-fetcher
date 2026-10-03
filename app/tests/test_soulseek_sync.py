@@ -30,9 +30,13 @@ import mutagen  # noqa: E402
 
 def make_audio(path: Path, kind: str) -> None:
     """Write a 2-second stereo test file. kind: flac24_96 | flac16 | wav16 | adpcm | lossy16 (white noise steeply low-passed at 16 kHz, like a 128 kbps MP3)"""
-    if kind == "mp3_320":
+    if kind in ("mp3_320", "mp3_fake320"):
+        # "fake" = white noise cut off steeply at 16 kHz (what a ~128 kbps source looks like), saved at 320
         path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "anoisesrc=d=2:c=pink:a=0.3:r=44100", "-ac", "2",
+        fake = kind == "mp3_fake320"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        f"anoisesrc=d=3:c={'white' if fake else 'pink'}:a=0.3:r=44100", "-ac", "2",
+                        *(["-af", ",".join(["lowpass=f=16000:p=2"] * 6)] if fake else []),
                         "-c:a", "libmp3lame", "-b:a", "320k", str(path)], capture_output=True, check=True)
         return
     src = {"lossy16": "anoisesrc=d=2:c=white:a=0.3:r=44100"}.get(
@@ -883,6 +887,37 @@ class Mp3FallbackIsKeptAsMp3Test(SyncFixture):
         searches, imports = len(self.nico.searches), len(self.rbfake.imports)
         self.run_sync()
         self.assertEqual((len(self.nico.searches), len(self.rbfake.imports)), (searches, imports))
+
+
+class FakeMp3320Test(SyncFixture):
+    """A '320 kbps' MP3 whose audio stops at 16 kHz is a low-quality file re-saved at 320."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-m", "Mp3 Only", "Somebody", 0)]
+
+    def test_a_fake_320_is_rejected_and_the_next_source_is_used(self):
+        self.nico.offer("Somebody", "Mp3 Only", "mp3_fake320", "fakepeer", "a/01 - Mp3 Only.mp3", {"0": 320}, free=True, speed=9000)
+        self.nico.offer("Somebody", "Mp3 Only", "mp3_320", "realpeer", "b/01 - Mp3 Only.mp3", {"0": 320}, free=False, speed=10)
+        self.run_sync()
+        users = [t for t in self.nico.downloads]
+        self.assertEqual([d["username"] for d in users], ["fakepeer", "realpeer"], "tried the fake first, then the real one")
+        self.assertEqual(len(list(self.music.rglob("*.mp3"))), 1)
+        self.assertEqual({t.file_extension for t, _ in self.rbfake.imports}, {"mp3"})
+
+    def test_a_genuine_320_is_kept(self):
+        self.nico.offer("Somebody", "Mp3 Only", "mp3_320", "realpeer", "b/01 - Mp3 Only.mp3", {"0": 320})
+        result = self.run_sync()
+        self.assertEqual(len(self.rbfake.imports), 1)
+        self.assertEqual(result["tracks_failed"], 0)
+
+    def test_only_a_fake_320_means_no_source_not_a_bad_import(self):
+        self.nico.offer("Somebody", "Mp3 Only", "mp3_fake320", "fakepeer", "a/01 - Mp3 Only.mp3", {"0": 320})
+        result = self.run_sync()
+        self.assertEqual(self.rbfake.imports, [])
+        self.assertEqual(result["tracks_failed"], 1)
+        self.assertEqual(list(self.music.rglob("*.mp3")), [])
 
 
 class FlacWithoutAttributesTest(unittest.TestCase):

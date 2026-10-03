@@ -129,7 +129,18 @@ def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str
 
 
 def _usable_download(path: Path) -> bool:
-    return path.suffix.lower() == ".mp3" or audio_formats.is_valid_lossless(path)
+    """Is this finished download worth keeping? A lossless file must really be lossless audio.
+    An MP3 (only ever the fallback) must really be a 320 kbps one: a "320" whose audio stops at
+    ~16 kHz is a ~128 kbps file re-saved at 320, so it is turned down and another source is tried
+    (a genuine 320 reaches ~20 kHz and passes). Lossless files that look transcoded are only
+    flagged, never rejected; an MP3 has no such leniency because it is already the last resort."""
+    if path.suffix.lower() == ".mp3":
+        verdict = soulseek.check_authenticity(path)
+        if verdict["suspect"]:
+            logger.info("rejected a fake 320 kbps MP3 (%s): %s", path.name, verdict["reason"])
+            return False
+        return True
+    return audio_formats.is_valid_lossless(path)
 
 
 def run_soulseek_sync(orch) -> dict:
