@@ -972,6 +972,34 @@ class QueuePatienceTest(SyncFixture):
         soulseek._peer_strikes.clear()
 
 
+class CappedWaitIsBoundedTest(SyncFixture):
+    """A track whose only sources sit with peers at their request limit must not wait forever
+    (it once looped for six hours and held up a whole playlist's import)."""
+
+    def test_it_eventually_gives_up(self):
+        now = [2_000_000.0]
+        sleeps = []
+
+        def sleep(sec):
+            sleeps.append(sec)
+            now[0] += sec
+            if len(sleeps) > 2000:
+                raise AssertionError("still looping")
+        mock.patch("time.time", lambda: now[0]).start()
+        mock.patch("time.sleep", sleep).start()
+        # three leftover requests from an earlier run keep this peer at its limit
+        self.nico.downloads.extend({"username": "busypeer", "virtual_path": f"old/{i}", "status": "Queued",
+                                    "progress_pct": None} for i in range(soulseek.MAX_ACTIVE_PER_PEER))
+        mock.patch.object(soulseek, "get_downloads", lambda active_only=False: list(self.nico.downloads)).start()
+        self.nico.offer("Artist Q", "Track Q", "flac16", "busypeer", "a/01 - Track Q.flac", {"4": 44100, "5": 16})
+        st = soulseek._TrackState(spotify_track(0, "id-q", "Track Q", "Artist Q", 0))
+        soulseek.resolve_all({"id-q": st}, max_wall_seconds=1e9)
+        self.assertTrue(st.resolved)
+        self.assertFalse(st.downloaded)
+        self.assertEqual(st.capped_waits, soulseek.MAX_CAPPED_WAITS)
+        self.assertLess(len(sleeps), 100)
+
+
 class FormatHierarchyTest(SyncFixture):
     """FLAC first, then WAV and AIFF as equals, then a 320 MP3 as the last resort."""
 

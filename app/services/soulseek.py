@@ -55,6 +55,11 @@ QUEUE_PATIENCE_SECONDS = 45 * 60
 PARALLEL_AFTER_SECONDS = 8 * 60
 MAX_PARALLEL_SOURCES = 2
 EXTRA_SEARCH_EVERY_SECONDS = 10 * 60      # looking for a second source: at most this often per track
+# Waiting for a slot with a busy peer is not a failed attempt, but it must not last forever: one
+# track whose only sources sat with peers already holding stale requests of ours (Nicotine+ can't
+# cancel them) looped for six hours and held up the whole playlist. After this many waits it
+# counts as a normal attempt, so the track eventually gives up.
+MAX_CAPPED_WAITS = 20
 
 DEAD_STATUSES = {
     "File not shared.", "User logged off", "Banned (banana)",
@@ -774,7 +779,7 @@ class _Source:
 
 class _TrackState:
     __slots__ = ("track", "key", "sources", "started", "mode", "tried_users", "attempts", "resolved", "downloaded",
-                 "local_path", "max_raw", "max_matched", "max_blocked", "next_extra_search")
+                 "local_path", "max_raw", "max_matched", "max_blocked", "next_extra_search", "capped_waits")
 
     def __init__(self, track):
         self.track = track
@@ -791,6 +796,7 @@ class _TrackState:
         self.max_matched = 0
         self.max_blocked = 0
         self.next_extra_search = 0.0   # earliest time to look for a second source
+        self.capped_waits = 0          # times the only sources were with peers already at their request limit
 
     def add_source(self, key: tuple, now: float | None = None) -> None:
         self.sources[key] = _Source(time.time() if now is None else now)
@@ -947,7 +953,7 @@ def _saved_file(file_path: str, download_dir: str) -> Path | None:
     return None
 
 
-def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_seconds: float = 6 * 3600,
+def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_seconds: float = 2.5 * 3600,
                 download_dir: str | None = None, validate=None, on_notice=None) -> None:
     """Poll until every track is downloaded or given up. Mutates `states` in place.
 
@@ -1068,8 +1074,9 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
                 for st, _ in searches])
             for (st, extra), (best, stats) in zip(searches, found):
                 st.note_search(stats)
-                if not best and stats.capped and not extra:
+                if not best and stats.capped and not extra and st.capped_waits < MAX_CAPPED_WAITS:
                     st.attempts -= 1        # only busy peers had it: waiting for a slot, not a failure
+                    st.capped_waits += 1
                 if best:
                     enqueue(best)
                     st.add_source((best["username"], best["file_path"]), now)
