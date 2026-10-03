@@ -119,13 +119,18 @@ def convert(src: Path, dst: Path, fmt: str) -> bool:
     return True
 
 
-def _unique(folder: Path, stem: str, fmt: str) -> Path:
-    dest = folder / f"{stem}.{FORMATS[fmt].ext}"
+def unique_path(folder: Path, stem: str, ext: str) -> Path:
+    """folder/stem.ext, or stem_1.ext, stem_2.ext... if that name is taken."""
+    dest = folder / f"{stem}.{ext}"
     n = 1
     while dest.exists():
-        dest = folder / f"{stem}_{n}.{FORMATS[fmt].ext}"
+        dest = folder / f"{stem}_{n}.{ext}"
         n += 1
     return dest
+
+
+def _unique(folder: Path, stem: str, fmt: str) -> Path:
+    return unique_path(folder, stem, FORMATS[fmt].ext)
 
 
 def build_outputs(

@@ -21,6 +21,7 @@ Spotify gained since.
 import dataclasses
 import logging
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -304,6 +305,27 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
                     logger.warning(msg)
                     progress.errors.append(msg)
 
+        # A 320 kbps MP3 only ever arrives as the fallback, when no lossless copy exists: keep it
+        # as the MP3 it is. Converting it to AIFF/WAV/FLAC would triple its size and label lossy
+        # audio as lossless, for no gain. It is tagged, given its cover, and shared by every
+        # selected playlist as one file.
+        if src.suffix.lower() == ".mp3":
+            dest_dir = Path(music_folder) / variants[fmts[0]].display_name
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            carry = tagging.read_carry_over_tags(src)
+            art = tagging.fetch_artwork(track.artwork_url) or tagging.embedded_picture(src)
+            dest = audio_formats.unique_path(dest_dir, src.stem, "mp3")
+            if keep_source:
+                shutil.copy2(src, dest)
+            else:
+                shutil.move(str(src), str(dest))
+            if not tagging.write_tags(dest, track, art, carry):
+                progress.errors.append(f"Could not write tags/cover for {label} (mp3); file kept as is")
+            for fmt in fmts:
+                planned.append((sid, fmt, dest))
+            logger.info("kept %s as a 320 kbps MP3 (the lossless fallback): %s", label, dest.name)
+            continue
+
         # A file that is already exactly the wanted format is reused in place (the same
         # physical file can sit in several Rekordbox playlists) -- no copy, no rewrite.
         for fmt in list(fmts):
@@ -371,7 +393,8 @@ def _write_to_rekordbox(orch, planned, variants, tracks, sources) -> None:
 
         for sid, path in mine:
             track = dataclasses.replace(
-                track_by_id[sid], file_extension=audio_formats.FORMATS[fmt].ext, playlist_name=v.display_name)
+                track_by_id[sid], file_extension=path.suffix.lstrip(".").lower() or audio_formats.FORMATS[fmt].ext,
+                playlist_name=v.display_name)
             file_path = str(path).replace("\\", "/")
             content_id = rb.import_track_unanalyzed(file_path, track).get("id")
             if content_id and rb.add_track_to_playlist(pid, content_id, track.position + 1):

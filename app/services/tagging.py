@@ -166,8 +166,13 @@ def _write_wav(path: Path, track, artwork: bytes | None, carry: dict) -> None:
     _write_id3_audio(path, track, artwork, carry, WAVE)
 
 
+def _write_mp3(path: Path, track, artwork: bytes | None, carry: dict) -> None:
+    from mutagen.mp3 import MP3
+    _write_id3_audio(path, track, artwork, carry, MP3)
+
+
 def write_tags(path: Path, track, artwork: bytes | None = None, carry: dict | None = None) -> bool:
-    """Write the clean tag set + cover into a FLAC or AIFF. Returns False (and
+    """Write the clean tag set + cover into a FLAC, AIFF, WAV or MP3. Returns False (and
     logs) instead of raising: bad tags shouldn't fail a download."""
     carry = carry if carry is not None else read_carry_over_tags(path)
     if artwork is None:
@@ -180,6 +185,8 @@ def write_tags(path: Path, track, artwork: bytes | None = None, carry: dict | No
             _write_aiff(path, track, artwork, carry)
         elif ext == ".wav":
             _write_wav(path, track, artwork, carry)
+        elif ext == ".mp3":
+            _write_mp3(path, track, artwork, carry)
         else:
             logger.info("No tag writer for %s files, skipping %s", ext, path.name)
             return False

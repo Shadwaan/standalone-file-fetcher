@@ -30,6 +30,11 @@ import mutagen  # noqa: E402
 
 def make_audio(path: Path, kind: str) -> None:
     """Write a 2-second stereo test file. kind: flac24_96 | flac16 | wav16 | adpcm | lossy16 (white noise steeply low-passed at 16 kHz, like a 128 kbps MP3)"""
+    if kind == "mp3_320":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "anoisesrc=d=2:c=pink:a=0.3:r=44100", "-ac", "2",
+                        "-c:a", "libmp3lame", "-b:a", "320k", str(path)], capture_output=True, check=True)
+        return
     src = {"lossy16": "anoisesrc=d=2:c=white:a=0.3:r=44100"}.get(
         kind, "anoisesrc=d=2:c=pink:a=0.3:r=%d" % (96000 if kind == "flac24_96" else 44100))
     steep = ",lowpass=f=16000:p=2" * 6 if kind == "lossy16" else ""
@@ -844,6 +849,40 @@ class UploaderReportTest(unittest.TestCase):
             with (tmp / "download_sources_by_playlist.csv").open(newline="", encoding="utf-8-sig") as fh:
                 out = [(r["playlist"], r["uploader"], r["tracks_supplied"]) for r in csv.DictReader(fh)]
         self.assertEqual(out, [("Deep tech", "otherguy", "1"), ("Dub", "dubguy", "2"), ("Dub", "otherguy", "1")])
+
+
+class Mp3FallbackIsKeptAsMp3Test(SyncFixture):
+    """A 320 kbps MP3 only arrives when no lossless copy exists. Keep it as the MP3 it is."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff", "wav"])
+        self.spotify_tracks = [spotify_track(0, "id-m", "Mp3 Only", "Somebody", 0)]
+        self.nico.offer("Somebody", "Mp3 Only", "mp3_320", "mp3peer", "share/01 - Mp3 Only.mp3", {"0": 320})
+
+    def test_it_is_not_converted_and_is_shared_by_every_playlist(self):
+        self.run_sync()
+        mp3s = list(self.music.rglob("*.mp3"))
+        self.assertEqual(len(mp3s), 1, "one file, not one per playlist")
+        self.assertEqual(list(self.music.rglob("*.aiff")) + list(self.music.rglob("*.wav")), [], "nothing converted")
+        self.assertEqual({(t.title, t.file_extension) for t, _ in self.rbfake.imports}, {("Mp3 Only", "mp3")})
+        self.assertEqual(len(self.rbfake.imports), 2, "imported into both playlists")
+        self.assertEqual(self.rbfake.imports[0][1], self.rbfake.imports[1][1], "the same file path")
+
+    def test_it_is_still_tagged_and_the_audio_is_untouched(self):
+        self.run_sync()
+        mp3 = next(self.music.rglob("*.mp3"))
+        tags = mutagen.File(mp3).tags
+        self.assertEqual(str(tags["TIT2"]), "Mp3 Only")
+        self.assertEqual(str(tags["TPE1"]), "Somebody")
+        info = mutagen.File(mp3).info
+        self.assertEqual(round(info.bitrate / 1000), 320)
+
+    def test_a_resync_does_not_download_or_import_it_again(self):
+        self.run_sync()
+        searches, imports = len(self.nico.searches), len(self.rbfake.imports)
+        self.run_sync()
+        self.assertEqual((len(self.nico.searches), len(self.rbfake.imports)), (searches, imports))
 
 
 class FlacWithoutAttributesTest(unittest.TestCase):
