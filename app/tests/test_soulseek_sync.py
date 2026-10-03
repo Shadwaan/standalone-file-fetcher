@@ -19,7 +19,7 @@ APP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP))
 
 from models.track import TrackInfo  # noqa: E402
-from services import app_config, audio_formats, failure_log, soulseek, source_log, sync, tagging  # noqa: E402
+from services import app_config, audio_formats, failure_log, soulseek, source_log, sync, tagging, verify_audio  # noqa: E402
 from services import rekordbox as rb  # noqa: E402
 
 REAL_ENQUEUE = soulseek.enqueue          # before any fixture replaces it with a fake
@@ -30,6 +30,15 @@ import mutagen  # noqa: E402
 
 def make_audio(path: Path, kind: str) -> None:
     """Write a 2-second stereo test file. kind: flac24_96 | flac16 | wav16 | adpcm | lossy16 (white noise steeply low-passed at 16 kHz, like a 128 kbps MP3)"""
+    if kind.startswith("song_"):
+        notes = {"song_a": [261.63, 329.63, 392.0], "song_b": [369.99, 466.16, 554.37]}[kind.split("_nobass")[0].split("_mp3")[0]]
+        bass = {"song_a": 65.41, "song_b": 92.5}[kind.split("_nobass")[0].split("_mp3")[0]]
+        expr = "+".join(f"0.25*sin(2*PI*{f}*t)" for f in notes) + ("" if "nobass" in kind else f"+0.5*sin(2*PI*{bass}*t)")
+        codec = ["-c:a", "libmp3lame", "-b:a", "320k"] if kind.endswith("_mp3") else ["-c:a", "flac"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"aevalsrc={expr}:s=44100:d=14", "-ac", "2",
+                        "-af", "aformat=sample_fmts=s16", *codec, str(path)], capture_output=True, check=True)
+        return
     if kind in ("mp3_320", "mp3_fake320"):
         # "fake" = white noise cut off steeply at 16 kHz (what a ~128 kbps source looks like), saved at 320
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -429,11 +438,9 @@ class NoDuplicateDownloadsTest(SyncFixture):
 
     def test_an_mp3_in_the_library_is_not_a_source_for_a_lossless_playlist(self):
         lib = self.tmp / "Library" / "Artist X - Track Xray.mp3"
-        lib.parent.mkdir()
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "anoisesrc=d=2", "-b:a", "320k", str(lib)],
-                       capture_output=True, check=True)
+        make_audio(lib, "song_a_mp3")          # the same music as the lossless file offered below
         self.rbfake.add_existing_playlist("MP3 playlist", {"Track Xray": str(lib).replace("\\", "/")})
-        self.nico.offer("Artist X", "Track Xray", "flac16", "u1", "m/01 - Track Xray.flac", {"4": 44100, "5": 16})
+        self.nico.offer("Artist X", "Track Xray", "song_a", "u1", "m/01 - Track Xray.flac", {"4": 44100, "5": 16})
         self.run_sync()
         self.assertEqual(self.nico.searches.count(self.query()), 1, "an MP3 can't stand in for lossless, so it searched")
         self.assertEqual(len(list(self.music.rglob("*.aiff"))), 1)
@@ -977,6 +984,101 @@ class FailureCooldownTest(SyncFixture):
 
     def test_the_slower_cooldown_applies_to_no_results_the_shorter_to_non_delivery(self):
         self.assertLess(failure_log.COOLDOWN_HOURS["source did not deliver"], failure_log.DEFAULT_COOLDOWN_HOURS)
+
+
+class StemMarkerNamesTest(unittest.TestCase):
+    """A real sync took 'Babert - Time After Time (Accapella)' because only 'acapella' was known."""
+
+    def test_every_spelling_of_acapella_and_the_other_stem_words_is_caught(self):
+        for name in ("06._Babert_-_Time_After_Time_(Accapella).aiff", "x/Foo (A Cappella).flac", "x/foo (Acappella).wav",
+                     "x/foo_acapella.mp3", "x/foo - vocals only.wav", "x/Foo (Isolated Vocals).flac", "x/Foo stems/01.flac",
+                     "x/foo karaoke.mp3", "x/foo (no vocals).flac"):
+            self.assertTrue(soulseek.has_stem_marker(name), name)
+
+    def test_ordinary_names_are_not_caught(self):
+        for name in ("x/Bicep - Satisfy.flac", "x/File system - Foo.flac", "x/Foo (Original Mix).flac",
+                     "x/Foo (Vocal Mix).flac", "x/Foo (Dub Mix).flac"):
+            self.assertFalse(soulseek.has_stem_marker(name), name)
+
+    def test_a_stem_file_is_rejected_for_an_ordinary_title_even_one_with_a_version(self):
+        self.assertFalse(soulseek.passes_version_guard(r"x\06._babert_-_time_after_time_(accapella).aiff", "Time After Time"))
+        self.assertFalse(soulseek.passes_version_guard(r"x\foo (accapella).flac", "Foo - Dub Mix"))
+
+    def test_but_it_is_allowed_when_the_title_itself_asks_for_one(self):
+        self.assertTrue(soulseek.passes_version_guard(r"x\foo (accapella).flac", "Foo (Acapella)"))
+
+
+class VerifyAudioTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        for kind in ("song_a", "song_b", "song_a_nobass", "song_a_mp3"):
+            make_audio(self.tmp / f"{kind}.{'mp3' if kind.endswith('mp3') else 'flac'}", kind)
+
+    def f(self, kind):
+        return self.tmp / f"{kind}.{'mp3' if kind.endswith('mp3') else 'flac'}"
+
+    def test_a_track_without_bass_is_a_stem_and_one_with_bass_is_not(self):
+        self.assertTrue(verify_audio.looks_like_stem(self.f("song_a_nobass")))
+        self.assertFalse(verify_audio.looks_like_stem(self.f("song_a")))
+
+    def test_the_same_song_matches_itself_in_another_format_and_a_different_song_does_not(self):
+        same = verify_audio.compare(self.f("song_a"), self.f("song_a_mp3"))
+        different = verify_audio.compare(self.f("song_b"), self.f("song_a_mp3"))
+        self.assertGreater(same, verify_audio.SAME_SONG_WARN_BELOW)
+        self.assertLess(different, verify_audio.SAME_SONG_REJECT_BELOW)
+
+
+class DownloadChecksTest(SyncFixture):
+    """A finished download is checked by its sound: not a stem, and the song you already have."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-x", "Song X", "Artist X", 0)]
+        self.reference = self.tmp / "Library" / "Artist X - Song X.mp3"
+        make_audio(self.reference, "song_a_mp3")
+
+    def with_reference(self):
+        self.rbfake.add_existing_playlist("MP3 playlist", {"Song X": str(self.reference).replace("\\", "/")})
+
+    def aiffs(self):
+        return list(self.music.rglob("*.aiff"))
+
+    def test_a_different_song_is_rejected_and_the_next_source_is_used(self):
+        self.with_reference()
+        self.nico.offer("Artist X", "Song X", "song_b", "wrongpeer", "a/01 - Song X.flac", {"4": 44100, "5": 16}, free=True, speed=9000)
+        self.nico.offer("Artist X", "Song X", "song_a", "rightpeer", "b/01 - Song X.flac", {"4": 44100, "5": 16}, free=False, speed=10)
+        self.run_sync()
+        self.assertEqual([d["username"] for d in self.nico.downloads], ["wrongpeer", "rightpeer"], "tried the wrong one first")
+        self.assertEqual(len(self.aiffs()), 1)
+        self.assertGreater(verify_audio.compare(self.aiffs()[0], self.reference), 0.95, "and the AIFF is the right song")
+
+    def test_only_a_different_song_means_no_source_with_the_reason_recorded(self):
+        self.with_reference()
+        self.nico.offer("Artist X", "Song X", "song_b", "wrongpeer", "a/01 - Song X.flac", {"4": 44100, "5": 16})
+        result = self.run_sync()
+        self.assertEqual(self.aiffs(), [])
+        self.assertEqual(result["tracks_failed"], 1)
+        self.assertTrue(any("different song" in e for e in result["errors"]), result["errors"])
+
+    def test_a_vocals_only_stem_is_rejected_even_when_nothing_is_there_to_compare_with(self):
+        self.nico.offer("Artist X", "Song X", "song_a_nobass", "stempeer", "a/01 - Song X.flac", {"4": 44100, "5": 16})
+        result = self.run_sync()
+        self.assertEqual(self.aiffs(), [])
+        self.assertTrue(any("vocals-only stem" in e for e in result["errors"]), result["errors"])
+
+    def test_a_stem_is_fine_when_the_track_asked_for_one(self):
+        self.spotify_tracks = [spotify_track(0, "id-x", "Song X (Acapella)", "Artist X", 0)]
+        self.nico.offer("Artist X", "Song X (Acapella)", "song_a_nobass", "stempeer", "a/01 - Song X (Acapella).flac",
+                        {"4": 44100, "5": 16})
+        self.run_sync()
+        self.assertEqual(len(self.aiffs()), 1)
+
+    def test_the_right_song_is_accepted(self):
+        self.with_reference()
+        self.nico.offer("Artist X", "Song X", "song_a", "rightpeer", "b/01 - Song X.flac", {"4": 44100, "5": 16})
+        self.run_sync()
+        self.assertEqual(len(self.aiffs()), 1)
 
 
 class FlacWithoutAttributesTest(unittest.TestCase):

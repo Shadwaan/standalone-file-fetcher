@@ -333,11 +333,27 @@ def _numbered_tags(text: str) -> set[tuple[str, str]]:
     return {("part" if w == "pt" else w, n) for w, n in _NUMBERED_TAG_RE.findall(text.lower())}
 
 
+# Files that are not the song itself but a part of it or a different use of it. Spelled every way
+# people spell them: a real sync accepted "(Accapella)" because only "acapella" was known.
+_STEM_RE = re.compile(
+    r"\ba\s*c{1,2}a{1,2}p{1,2}e?l{1,2}a\b"                                   # acapella, accapella, acappella, a cappella, acapela...
+    r"|\bvocals?\s+(?:only|stems?|version)\b|\bisolated\s+vocals?\b|\bvocal\s+track\b"
+    r"|\b(?:no|without|minus)\s+vocals?\b|\bstems?\b|\bkaraoke\b|\bbacking\s+track\b|\bmulti-?tracks?\b",
+    re.IGNORECASE)
+
+
+def has_stem_marker(text: str) -> bool:
+    """Does this file path / title say it is an acapella, vocal-only, instrumental-less stem or karaoke track?"""
+    return bool(_STEM_RE.search(re.sub(r"[_\.]+", " ", text)))
+
+
 def passes_version_guard(file_path_lower: str, title_full: str) -> bool:
     """True if this candidate is an acceptable version match for the title:
     a plain title rejects an unrequested remix/rework/etc; a title that names
     a specific remix requires that remixer's name to actually appear; and a numbered
     version ("Mix 1", "Part 2") must not be a different number."""
+    if has_stem_marker(file_path_lower) and not has_stem_marker(title_full):
+        return False                      # a stem/acapella/karaoke file, when that is not what was asked for
     filename = re.split(r"[\\/]", file_path_lower)[-1]      # not the folder: "Vol. 1" compilations
     cand_tags = _numbered_tags(filename)
     if cand_tags and cand_tags != _numbered_tags(title_full):
@@ -347,7 +363,9 @@ def passes_version_guard(file_path_lower: str, title_full: str) -> bool:
         # a plain title: "(Original Mix)" is fine, an unrequested remix/live/etc. is not
         if any(safe in file_path_lower for safe in _SAFE_PHRASES):
             return True
-        return not any(marker in file_path_lower for marker in _ALT_VERSION_MARKERS)
+        # an alternative version is only unwanted if the title did not ask for it ("Foo (Live)" wants live)
+        title_lower = title_full.lower()
+        return not any(marker in file_path_lower and marker not in title_lower for marker in _ALT_VERSION_MARKERS)
 
     # A title that names a version needs THAT version. "(Original Mix)" is no longer an
     # escape hatch here: it is the one version this title is not.
@@ -779,7 +797,8 @@ class _Source:
 
 class _TrackState:
     __slots__ = ("track", "key", "sources", "started", "mode", "tried_users", "attempts", "resolved", "downloaded",
-                 "local_path", "max_raw", "max_matched", "max_blocked", "next_extra_search", "capped_waits", "deferred")
+                 "local_path", "max_raw", "max_matched", "max_blocked", "next_extra_search", "capped_waits", "deferred",
+                 "rejections")
 
     def __init__(self, track):
         self.track = track
@@ -798,6 +817,7 @@ class _TrackState:
         self.next_extra_search = 0.0   # earliest time to look for a second source
         self.capped_waits = 0          # times the only sources were with peers already at their request limit
         self.deferred = False          # left alone on purpose: it failed recently (see failure_log)
+        self.rejections = []           # why finished downloads were turned down ("wrong song", "vocals only"...)
 
     def add_source(self, key: tuple, now: float | None = None) -> None:
         self.sources[key] = _Source(time.time() if now is None else now)
@@ -820,6 +840,8 @@ class _TrackState:
         return "wrong quality / dead source"
 
     def why_no_source(self) -> str:
+        if self.rejections:
+            return f"{len(self.rejections)} download(s) were rejected: " + "; ".join(sorted(set(self.rejections)))
         if self.max_raw == 0:
             return "the network returned no results for it"
         if self.max_matched == 0:
@@ -1005,15 +1027,22 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
 
                 if status == "Finished":
                     usable = True
+                    why_not = None
                     if validate and download_dir:
                         f = _saved_file(key[1], download_dir)
-                        usable = bool(f) and validate(f)
+                        verdict = validate(f, st.track) if f else False
+                        usable = verdict is True
+                        if not usable:
+                            why_not = verdict if isinstance(verdict, str) else "not usable"
                     if usable:
                         winner = key
                         break
-                    logger.info("unusable download from %s for %s - %s", key[0], st.track.artist, st.track.title)
+                    logger.info("rejected the download from %s for %s - %s: %s", key[0], st.track.artist, st.track.title,
+                                why_not or "not usable")
+                    st.rejections.append(why_not or "not usable")
                     if on_progress:
-                        on_progress(f"Unusable download, trying another source: {st.track.artist} - {st.track.title}")
+                        on_progress(f"Rejected a download ({why_not or 'not usable'}), trying another source: "
+                                    f"{st.track.artist} - {st.track.title}")
                     del st.sources[key]
                     st.tried_users.add(key[0])
                     continue

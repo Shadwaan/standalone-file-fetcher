@@ -25,7 +25,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from services import app_config, audio_formats, failure_log, soulseek, source_log, tagging
+from services import app_config, audio_formats, failure_log, soulseek, source_log, tagging, verify_audio
 from services import rekordbox as rb
 
 logger = logging.getLogger(__name__)
@@ -128,19 +128,58 @@ def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str
     return found
 
 
-def _usable_download(path: Path) -> bool:
-    """Is this finished download worth keeping? A lossless file must really be lossless audio.
-    An MP3 (only ever the fallback) must really be a 320 kbps one: a "320" whose audio stops at
-    ~16 kHz is a ~128 kbps file re-saved at 320, so it is turned down and another source is tried
-    (a genuine 320 reaches ~20 kHz and passes). Lossless files that look transcoded are only
-    flagged, never rejected; an MP3 has no such leniency because it is already the last resort."""
-    if path.suffix.lower() == ".mp3":
-        verdict = soulseek.check_authenticity(path)
-        if verdict["suspect"]:
-            logger.info("rejected a fake 320 kbps MP3 (%s): %s", path.name, verdict["reason"])
-            return False
+_AUDIO_EXTS = audio_formats.LOSSLESS_EXTS | {".mp3"}
+
+
+def _references(needed, track_by_id, library) -> dict[str, Path]:
+    """For each wanted track, a file we already hold that is the right song (e.g. the YouTube MP3 from
+    before): the yardstick a download is compared with. Matched like _existing_sources (title + artist)."""
+    out = {}
+    for sid in needed:
+        track = track_by_id[sid]
+        title = track.title.strip().lower()
+        first_artist = track.artist.split(",")[0].strip().lower()
+        exact_stem = f"{track.artist} - {track.title}".lower()
+        for lib_title, lib_path in library:
+            path = Path(lib_path)
+            if path.suffix.lower() not in _AUDIO_EXTS:
+                continue
+            if (path.stem.lower() == exact_stem or (lib_title.strip().lower() == title and first_artist in lib_path.lower())) \
+                    and path.is_file():
+                out[sid] = path
+                break
+    return out
+
+
+def _make_validator(references: dict[str, Path]):
+    """The "is this finished download any good?" gate resolve_all applies to every file that arrives.
+    Returns True, or a short reason it was turned down (and another source is tried)."""
+    def validate(path: Path, track):
+        if path.suffix.lower() == ".mp3":
+            verdict = soulseek.check_authenticity(path)
+            if verdict["suspect"]:
+                logger.info("rejected a fake 320 kbps MP3 (%s): %s", path.name, verdict["reason"])
+                return "a fake 320 kbps MP3"
+        elif not audio_formats.is_valid_lossless(path):
+            return "not valid lossless audio"
+
+        # a stem is never wanted unless the track itself is one
+        if not soulseek.has_stem_marker(track.title) and verify_audio.looks_like_stem(path):
+            logger.info("rejected %s: it has almost no bass, so it is a vocals-only stem", path.name)
+            return "a vocals-only stem"
+
+        reference = references.get(track.spotify_id)
+        if reference and reference != path:
+            similarity = verify_audio.compare(path, reference)
+            if similarity is not None:
+                if similarity < verify_audio.SAME_SONG_REJECT_BELOW:
+                    logger.info("rejected %s: it does not match the copy you already have (%.2f)", path.name, similarity)
+                    return f"a different song from the copy you already have (match {similarity:.2f})"
+                if similarity < verify_audio.SAME_SONG_WARN_BELOW:
+                    logger.warning("%s only partly matches the copy you already have (%.2f): a different version?",
+                                   path.name, similarity)
         return True
-    return audio_formats.is_valid_lossless(path)
+    return validate
 
 
 def run_soulseek_sync(orch) -> dict:
@@ -281,7 +320,8 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
                 f"Action needed from you: {req['user']} wants proof you are a person before it will send files -- "
                 f"open Nicotine+ > Private Chat > {req['user']} and {ask} yourself. sff will not answer these for you.")
 
-        soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir, validate=_usable_download,
+        soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir,
+                             validate=_make_validator(_references(needed, track_by_id, library)),
                              on_notice=_notice)
 
     # 3. FILE WORK
