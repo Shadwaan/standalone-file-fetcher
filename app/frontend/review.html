@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Review flagged tracks</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0f; color: #e0e0e0;
+           min-height: 100vh; padding: 20px; }
+    .wrap { max-width: 980px; margin: 0 auto; }
+    h1 { font-size: 22px; color: #fff; font-weight: 600; }
+    .sub { font-size: 13px; color: #777; margin: 4px 0 16px; }
+    a { color: #1db954; }
+    .bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+    .progress { flex: 1 1 220px; min-width: 200px; }
+    .progress .track { height: 8px; background: #1c1c26; border-radius: 4px; overflow: hidden; }
+    .progress .fill { height: 100%; background: #1db954; width: 0; transition: width .25s; }
+    .progress .label { font-size: 12px; color: #888; margin-top: 4px; }
+    select, button { font: inherit; }
+    select { background: #14141c; color: #e0e0e0; border: 1px solid #2a2a38; border-radius: 6px; padding: 8px 10px; }
+    .card { background: #12121a; border: 1px solid #22222e; border-radius: 12px; padding: 18px; }
+    .head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+    .title { font-size: 20px; color: #fff; font-weight: 600; }
+    .artist { color: #aaa; margin-top: 2px; }
+    .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+    .chip { font-size: 12px; padding: 4px 9px; border-radius: 999px; background: #1c1c26; color: #bbb; white-space: nowrap; }
+    .chip.wrong { background: #3a1820; color: #ff8a9b; }
+    .chip.grey { background: #3a2f12; color: #ffd166; }
+    .chip.version { background: #1b2c3d; color: #7cc4ff; }
+    .chip.stem { background: #2c1a3d; color: #d6a8ff; }
+    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 720px) { .panels { grid-template-columns: 1fr; } }
+    .panel { background: #0e0e15; border: 2px solid #22222e; border-radius: 10px; padding: 12px; transition: border-color .15s; }
+    .panel.active { border-color: #1db954; }
+    .panel h2 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #888; margin-bottom: 4px; }
+    .panel .name { font-size: 13px; color: #ccc; word-break: break-all; margin-bottom: 8px; min-height: 2.6em; }
+    .panel .missing { color: #ff8a9b; font-size: 13px; }
+    audio { width: 100%; height: 40px; }
+    .status { font-size: 12px; color: #888; margin-top: 6px; min-height: 1.4em; }
+    .tools { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; align-items: center; }
+    .btn { background: #1c1c26; color: #e0e0e0; border: 1px solid #2a2a38; border-radius: 8px; padding: 9px 14px; cursor: pointer; }
+    .btn:hover { background: #242433; }
+    .btn.primary { background: #1db954; border-color: #1db954; color: #04130a; font-weight: 600; }
+    .btn.primary:hover { background: #1ed760; }
+    .btn kbd { font: 11px ui-monospace, Consolas, monospace; background: #0a0a0f; border: 1px solid #333; border-radius: 4px;
+               padding: 1px 5px; margin-left: 6px; color: #999; }
+    .marks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 6px; }
+    @media (max-width: 720px) { .marks { grid-template-columns: 1fr 1fr; } }
+    .mark { padding: 12px 10px; text-align: center; line-height: 1.3; }
+    .mark.on { outline: 2px solid #fff; }
+    .mark.new_right { background: #123a24; border-color: #1db954; }
+    .mark.youtube_right { background: #3a1820; border-color: #ff5a73; }
+    .mark.both_ok { background: #1b2c3d; border-color: #4aa8ff; }
+    .mark.neither { background: #3a2f12; border-color: #ffc233; }
+    .nav { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; gap: 8px; flex-wrap: wrap; }
+    .hint { font-size: 12px; color: #666; margin-top: 12px; line-height: 1.6; }
+    .empty { text-align: center; padding: 60px 20px; color: #888; }
+    .list { margin-top: 18px; border-top: 1px solid #1c1c26; padding-top: 12px; max-height: 260px; overflow: auto; }
+    .row { display: flex; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; align-items: center; }
+    .row:hover { background: #16161f; }
+    .row.cur { background: #1b1b27; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #333; flex: none; }
+    .dot.new_right { background: #1db954; } .dot.youtube_right { background: #ff5a73; }
+    .dot.both_ok { background: #4aa8ff; } .dot.neither { background: #ffc233; }
+    .row .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row .s { color: #777; font-variant-numeric: tabular-nums; }
+    .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #1f1f2c; border: 1px solid #3a3a4e;
+             border-radius: 10px; padding: 10px 14px; display: none; gap: 14px; align-items: center; box-shadow: 0 8px 30px #000a;
+             font-size: 14px; z-index: 10; max-width: 92vw; }
+    .toast.show { display: flex; }
+</style>
+</head>
+<body>
+<div class="wrap">
+    <h1>Review flagged tracks</h1>
+    <div class="sub">Each flagged download next to the YouTube copy you already had. Listen to both, then mark which is right.
+        Nothing here changes your library — your marks are saved and used afterwards. <a href="/">Back to File Fetcher</a></div>
+
+    <div class="bar">
+        <div class="progress">
+            <div class="track"><div class="fill" id="fill"></div></div>
+            <div class="label" id="progressLabel"></div>
+        </div>
+        <select id="filter" aria-label="Which tracks to show">
+            <option value="unmarked">Unmarked only</option>
+            <option value="all">All flagged</option>
+            <option value="wrong_clear">Clearly different song</option>
+            <option value="grey">Grey zone (could be a remix)</option>
+            <option value="version">Probably a different version</option>
+            <option value="stem">Vocals-only / no bass</option>
+        </select>
+    </div>
+
+    <div id="stage"></div>
+    <div class="list" id="list"></div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"><span id="toastText"></span>
+    <button class="btn" id="undoBtn">Undo <kbd>U</kbd></button></div>
+
+<script>
+const MARKS = [
+    ['new_right', 'New file is right', '1'],
+    ['youtube_right', 'YouTube is right', '2'],
+    ['both_ok', 'Both fine', '3'],
+    ['neither', 'Neither', '4'],
+];
+let data = { items: [], marked: 0, total: 0 };
+let view = [];           // the items the current filter shows
+let pos = 0;             // index into view
+let active = 'new';      // which of the two players is "live" for the keyboard
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = s => isFinite(s) ? Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0') : '–';
+
+async function load(keepId) {
+    data = await (await fetch('/api/review/items')).json();
+    applyFilter(keepId);
+}
+
+function applyFilter(keepId) {
+    const f = $('filter').value;
+    view = data.items.filter(it => f === 'all' ? true : f === 'unmarked' ? !it.mark : it.group === f);
+    // most uncertain first: the grey zone, then the clearly different, then the rest
+    const order = { grey: 0, wrong_clear: 1, stem: 2, version: 3, other: 4 };
+    view.sort((a, b) => (order[a.group] - order[b.group]) || ((a.similarity ?? 9) - (b.similarity ?? 9)));
+    pos = keepId ? Math.max(0, view.findIndex(i => i.id === keepId)) : Math.min(pos, Math.max(0, view.length - 1));
+    render();
+}
+
+function groupChip(it) {
+    const sim = it.similarity == null ? '' : ' · match ' + it.similarity.toFixed(2);
+    const label = { wrong_clear: 'Clearly different song', grey: 'Grey zone', version: 'Probably another version',
+                    stem: 'Vocals-only / no bass', other: 'Flagged' }[it.group];
+    const cls = { wrong_clear: 'wrong', grey: 'grey', version: 'version', stem: 'stem' }[it.group] || '';
+    return `<span class="chip ${cls}">${label}${sim}</span>`;
+}
+
+function render() {
+    const done = data.marked, total = data.total;
+    $('fill').style.width = total ? (100 * done / total) + '%' : '0';
+    $('progressLabel').textContent = `${done} of ${total} marked`;
+    renderList();
+    const stage = $('stage');
+    if (!view.length) {
+        stage.innerHTML = `<div class="card empty">${data.total ? 'Nothing left in this view. 🎉' : 'No flagged tracks found. Run the audit first.'}</div>`;
+        return;
+    }
+    const it = view[pos];
+    active = 'new';
+    stage.innerHTML = `
+    <div class="card">
+        <div class="head">
+            <div>
+                <div class="title">${esc(it.title)}</div>
+                <div class="artist">${esc(it.artist)} · ${esc(it.playlist)}</div>
+            </div>
+            <div class="meta">${groupChip(it)}${it.bass_share ? `<span class="chip">bass ${esc(it.bass_share)}</span>` : ''}</div>
+        </div>
+        <div class="panels">
+            ${panel('new', 'New · from Soulseek', it.new_name, it.has_new, it.id)}
+            ${panel('old', 'YouTube · what you had', it.old_name, it.has_old, it.id)}
+        </div>
+        <div class="tools">
+            <button class="btn primary" id="switchBtn" title="Swap to the other version at the same position">Switch A/B <kbd>Tab</kbd></button>
+            <button class="btn" id="playBtn">Play / pause <kbd>Space</kbd></button>
+            <span style="color:#666;font-size:12px">Jump to</span>
+            ${[30, 60, 120].map(s => `<button class="btn" data-jump="${s}">${fmt(s)}</button>`).join('')}
+            <button class="btn" data-jump="-10" title="Back 10 seconds">−10s <kbd>[</kbd></button>
+            <button class="btn" data-jump="+10" title="Forward 10 seconds">+10s <kbd>]</kbd></button>
+        </div>
+        <div class="marks">
+            ${MARKS.map(([key, text, k]) => `<button class="btn mark ${key} ${it.mark === key ? 'on' : ''}" data-mark="${key}">${text}<kbd>${k}</kbd></button>`).join('')}
+        </div>
+        <div class="nav">
+            <button class="btn" id="prevBtn">← Previous</button>
+            <span style="color:#777;font-size:13px">${pos + 1} of ${view.length} in this view</span>
+            <span>
+                ${it.mark ? '<button class="btn" id="clearBtn">Clear mark</button>' : ''}
+                <button class="btn" id="nextBtn">Skip / next →</button>
+            </span>
+        </div>
+        <div class="hint">Shortcuts: <b>Space</b> play/pause · <b>Tab</b> switch version (keeps your place) · <b>1 2 3 4</b> mark · <b>U</b> undo · <b>← →</b> previous/next · <b>[ ]</b> seek.
+            The first play of an AIFF takes a few seconds while it is prepared for the browser.</div>
+    </div>`;
+    wire(it);
+}
+
+function panel(which, heading, name, exists, id) {
+    return `<div class="panel ${which === 'new' ? 'active' : ''}" id="panel-${which}">
+        <h2>${heading}</h2>
+        <div class="name">${exists ? esc(name) : '<span class="missing">File not found</span>'}</div>
+        ${exists ? `<audio id="audio-${which}" controls preload="none" src="/api/review/audio/${id}/${which}"></audio>` : ''}
+        <div class="status" id="status-${which}"></div>
+    </div>`;
+}
+
+function player(which) { return $('audio-' + which); }
+function other() { return active === 'new' ? 'old' : 'new'; }
+
+function setActive(which) {
+    active = which;
+    for (const w of ['new', 'old']) $('panel-' + w)?.classList.toggle('active', w === which);
+}
+
+function switchAB() {
+    const from = player(active), to = player(other());
+    if (!to) return;
+    const t = from ? from.currentTime : 0, wasPlaying = from && !from.paused;
+    if (from) from.pause();
+    const go = () => { to.currentTime = t; if (wasPlaying) to.play(); };
+    setActive(other());
+    to.readyState >= 1 ? go() : (to.addEventListener('loadedmetadata', go, { once: true }), to.load());
+}
+
+function togglePlay() {
+    const p = player(active);
+    if (!p) return;
+    const o = player(other());
+    if (o) o.pause();
+    p.paused ? p.play() : p.pause();
+}
+
+function jump(spec) {
+    const p = player(active);
+    if (!p) return;
+    const apply = () => { p.currentTime = spec[0] === '+' || spec[0] === '-' ? Math.max(0, p.currentTime + Number(spec)) : Number(spec); };
+    p.readyState >= 1 ? apply() : (p.addEventListener('loadedmetadata', apply, { once: true }), p.load());
+}
+
+function wire(it) {
+    for (const w of ['new', 'old']) {
+        const p = player(w);
+        if (!p) continue;
+        p.addEventListener('play', () => { setActive(w); const o = player(w === 'new' ? 'old' : 'new'); if (o) o.pause(); });
+        p.addEventListener('waiting', () => $('status-' + w).textContent = 'Preparing…');
+        p.addEventListener('playing', () => $('status-' + w).textContent = '');
+        p.addEventListener('loadedmetadata', () => $('status-' + w).textContent = 'Length ' + fmt(p.duration));
+        p.addEventListener('error', () => $('status-' + w).textContent = 'Could not play this file');
+    }
+    $('switchBtn').onclick = switchAB;
+    $('playBtn').onclick = togglePlay;
+    document.querySelectorAll('[data-jump]').forEach(b => b.onclick = () => jump(b.dataset.jump));
+    document.querySelectorAll('[data-mark]').forEach(b => b.onclick = () => mark(it, b.dataset.mark));
+    $('prevBtn').onclick = () => go(-1);
+    $('nextBtn').onclick = () => go(1);
+    if ($('clearBtn')) $('clearBtn').onclick = () => mark(it, null);
+}
+
+function go(d) {
+    if (!view.length) return;
+    stopAll();
+    pos = (pos + d + view.length) % view.length;
+    render();
+}
+
+function stopAll() { for (const w of ['new', 'old']) player(w)?.pause(); }
+
+let lastMark = null, toastTimer = null;
+
+async function setMark(id, value) {
+    await fetch('/api/review/mark', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ id, mark: value }) });
+}
+
+function toast(text) {
+    $('toastText').textContent = text;
+    $('toast').classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => $('toast').classList.remove('show'), 10000);
+}
+
+async function mark(it, value) {
+    stopAll();
+    lastMark = { id: it.id, prev: it.mark };
+    await setMark(it.id, value);
+    if (value) toast(`Marked “${it.title}”: ${MARKS.find(m => m[0] === value)[1]}`);
+    const wasUnmarkedView = $('filter').value === 'unmarked';
+    const nextId = view[(pos + 1) % view.length]?.id;
+    await load(wasUnmarkedView && value ? nextId : it.id);
+}
+
+async function undo() {
+    if (!lastMark) return;
+    const { id, prev } = lastMark;
+    lastMark = null;
+    $('toast').classList.remove('show');
+    stopAll();
+    await setMark(id, prev || null);
+    if ($('filter').value === 'unmarked') $('filter').value = 'all';
+    await load(id);
+}
+
+function renderList() {
+    $('list').innerHTML = view.map((it, i) => `<div class="row ${i === pos ? 'cur' : ''}" data-i="${i}">
+        <span class="dot ${it.mark || ''}"></span>
+        <span class="t">${esc(it.title)} <span style="color:#666">— ${esc(it.artist)}</span></span>
+        <span class="s">${it.similarity == null ? '' : it.similarity.toFixed(2)}</span></div>`).join('');
+    document.querySelectorAll('.row').forEach(r => r.onclick = () => { stopAll(); pos = Number(r.dataset.i); render(); });
+}
+
+document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const it = view[pos];
+    if (!it) return;
+    if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+    else if (e.key === 'Tab') { e.preventDefault(); switchAB(); }
+    else if ('1234'.includes(e.key) && e.key) { mark(it, MARKS[Number(e.key) - 1][0]); }
+    else if (e.key === 'u' || e.key === 'U') undo();
+    else if (e.key === 'ArrowRight') go(1);
+    else if (e.key === 'ArrowLeft') go(-1);
+    else if (e.key === '[') jump('-10');
+    else if (e.key === ']') jump('+10');
+});
+
+$('filter').onchange = () => { stopAll(); pos = 0; applyFilter(); };
+$('undoBtn').onclick = undo;
+load();
+</script>
+</body>
+</html>

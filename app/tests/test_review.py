@@ -1,0 +1,99 @@
+"""The listen-and-mark review page: its data, marks, and which files it will serve."""
+import csv
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from fastapi import HTTPException  # noqa: E402
+
+import review  # noqa: E402
+
+
+class ReviewTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.new_a, self.old_a = self.tmp / "new" / "a.aiff", self.tmp / "old" / "a.mp3"
+        self.new_b = self.tmp / "new" / "b.aiff"
+        self.new_a.parent.mkdir(parents=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "pcm_s16be",
+                        str(self.new_a)], capture_output=True, check=True)
+        self.old_a.parent.mkdir(parents=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-b:a", "128k",
+                        str(self.old_a)], capture_output=True, check=True)
+        self.new_b.write_bytes(b"x")                                  # exists, but has no YouTube copy
+
+        audit = self.tmp / "audit.csv"
+        with audit.open("w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.DictWriter(fh, fieldnames=["playlist", "title", "verdict", "similarity_to_reference", "bass_share",
+                                               "new_file", "reference"])
+            w.writeheader()
+            w.writerow({"playlist": "FF Oldies", "title": "Pleasure Love", "verdict": "WRONG SONG", "similarity_to_reference": "0.59",
+                        "bass_share": "0.36", "new_file": str(self.new_a), "reference": str(self.old_a)})
+            w.writerow({"playlist": "FF Oldies", "title": "Time After Time", "verdict": "VOCALS-ONLY / NO BASS",
+                        "similarity_to_reference": "", "bass_share": "0.018", "new_file": str(self.new_b), "reference": ""})
+        state = self.tmp / "state.json"
+        state.write_text(json.dumps({"playlists": {"p": {"variants": {"aiff": {"tracks": {"t1": {
+            "file_path": str(self.new_a).replace("\\", "/"), "artist": "Supafly & De Funk", "title": "Pleasure Love"}}}}}}}), encoding="utf-8")
+        for name, value in (("AUDIT_FILE", audit), ("MARKS_FILE", self.tmp / "marks.json"), ("CACHE_DIR", self.tmp / "cache"),
+                            ("STATE_FILE", state)):
+            mock.patch.object(review, name, value).start()
+        self.addCleanup(mock.patch.stopall)
+        self.items = {i["title"]: i for i in review.load_items()}
+
+    def test_items_carry_what_the_page_shows(self):
+        pl = self.items["Pleasure Love"]
+        self.assertEqual((pl["artist"], pl["group"], pl["similarity"], pl["has_new"], pl["has_old"]),
+                         ("Supafly & De Funk", "grey", 0.59, True, True))
+        self.assertEqual(self.items["Time After Time"]["group"], "stem")
+        self.assertFalse(self.items["Time After Time"]["has_old"], "no YouTube copy to compare with")
+
+    def test_groups_follow_the_similarity_bands(self):
+        g = lambda sim, verdict="WRONG SONG": review._group({"verdict": verdict, "similarity_to_reference": sim})
+        self.assertEqual([g("0.2"), g("0.4"), g("0.8"), g("")], ["wrong_clear", "grey", "version", "other"])
+
+    def test_a_mark_is_saved_and_can_be_cleared(self):
+        iid = self.items["Pleasure Love"]["id"]
+        review.review_mark(review.Mark(id=iid, mark="youtube_right"))
+        self.assertEqual({i["title"]: i["mark"] for i in review.load_items()}["Pleasure Love"], "youtube_right")
+        self.assertEqual(review.review_items()["marked"], 1)
+        review.review_mark(review.Mark(id=iid, mark=None))
+        self.assertEqual(review.review_items()["marked"], 0)
+
+    def test_an_unknown_mark_or_a_malformed_id_is_refused(self):
+        with self.assertRaises(HTTPException):
+            review.review_mark(review.Mark(id=self.items["Pleasure Love"]["id"], mark="bananas"))
+        with self.assertRaises(HTTPException):
+            review.review_mark(review.Mark(id="../../etc/passwd", mark="both_ok"))
+
+    def test_only_files_named_in_the_audit_can_be_served(self):
+        for bad in ("deadbeef0000", "..%2F..%2Fmain", "0" * 12):
+            with self.assertRaises(HTTPException) as ctx:
+                review.review_audio(bad, "new")
+            self.assertEqual(ctx.exception.status_code, 404)
+        with self.assertRaises(HTTPException):
+            review.review_audio(self.items["Pleasure Love"]["id"], "etc")
+
+    def test_a_missing_file_is_a_404_not_a_crash(self):
+        with self.assertRaises(HTTPException) as ctx:
+            review.review_audio(self.items["Time After Time"]["id"], "old")
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_an_aiff_is_converted_for_the_browser_once_and_an_mp3_is_served_as_is(self):
+        playable = review._playable(self.new_a)
+        self.assertEqual(playable.suffix, ".mp3")
+        mtime = playable.stat().st_mtime_ns
+        self.assertEqual(review._playable(self.new_a), playable)
+        self.assertEqual(playable.stat().st_mtime_ns, mtime, "cached, not converted again")
+        self.assertEqual(review._playable(self.old_a), self.old_a)
+        response = review.review_audio(self.items["Pleasure Love"]["id"], "new")
+        self.assertEqual(Path(response.path), playable)
+
+
+if __name__ == "__main__":
+    unittest.main()

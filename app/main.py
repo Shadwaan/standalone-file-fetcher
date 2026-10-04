@@ -43,6 +43,9 @@ logger = logging.getLogger("sff")
 # Create FastAPI app
 app = FastAPI(title="Standalone File Fetcher", version="1.0.0")
 
+from review import router as review_router  # noqa: E402  (listen-and-mark page for flagged downloads)
+app.include_router(review_router)
+
 # Serve frontend
 frontend_dir = Path(__file__).parent / "frontend"
 app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")

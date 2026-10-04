@@ -22,3 +22,6 @@ failed_tracks*.csv
 failed_tracks*.txt
 download_sources.csv
 download_sources_by_playlist.csv
+review_marks.json
+suspect_downloads_audit.csv
+.review_cache/
