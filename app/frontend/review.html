@@ -99,6 +99,16 @@
     .keepfields input:focus { outline: none; border-color: #1db954; }
     .keepfields .preview { grid-column: 1 / -1; }
     .keepfields[hidden] { display: none; }
+    .modal-bg { position: fixed; inset: 0; background: #000b; display: none; align-items: center; justify-content: center; z-index: 20; padding: 16px; }
+    .modal-bg.show { display: flex; }
+    .modal { background: #14141c; border: 1px solid #33334a; border-radius: 14px; padding: 20px; max-width: 560px; width: 100%;
+             max-height: 86vh; overflow: auto; box-shadow: 0 20px 60px #000c; }
+    .modal h3 { color: #fff; font-size: 18px; margin-bottom: 8px; }
+    .modal p { color: #bbb; font-size: 14px; line-height: 1.5; margin: 6px 0; }
+    .modal ul { margin: 8px 0 8px 18px; color: #ccc; font-size: 13px; line-height: 1.6; }
+    .modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+    .modal .warn { color: #ffd166; }
+    .modal .bad { color: #ff8a9b; }
     .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #1f1f2c; border: 1px solid #3a3a4e;
              border-radius: 10px; padding: 10px 14px; display: none; gap: 14px; align-items: center; box-shadow: 0 8px 30px #000a;
              font-size: 14px; z-index: 10; max-width: 92vw; }
@@ -132,6 +142,8 @@
     <div id="stage"></div>
     <div class="list" id="list"></div>
 </div>
+
+<div class="modal-bg" id="modalBg"><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"><span id="toastText"></span>
     <button class="btn" id="undoBtn">Undo <kbd>U</kbd></button></div>
@@ -509,14 +521,47 @@ function updatePending() {
     $('applyBtn').disabled = n === 0;
 }
 
-async function applyLabels() {
-    if (!confirm('Write the version labels and renamed songs into Rekordbox (and the files)? Rekordbox must be closed.')) return;
-    $('applyBtn').disabled = true;
-    const r = await fetch('/api/review/apply-labels', { method: 'POST' });
-    const d = await r.json();
-    if (!r.ok) { toast(d.detail || 'Could not apply the changes.'); updatePending(); return; }
-    toast(`Applied to ${d.applied.length} track(s)` + (d.failed.length ? ` — ${d.failed.length} not found in Rekordbox: ${d.failed.join(', ')}` : '.'));
-    await load(view[pos]?.id);
+function showModal(html) { $('modal').innerHTML = html; $('modalBg').classList.add('show'); }
+function closeModal() { $('modalBg').classList.remove('show'); }
+
+// An in-page confirmation: the browser's own confirm() popup is blocked in some browsers (it then
+// answers "no" without showing anything, which made this button look dead).
+function applyLabels() {
+    const todo = data.items.filter(i => i.keep_title ? !i.applied_keep : (i.mark !== 'wrong' && (i.label || '') !== (i.applied_label || '')));
+    const keeps = todo.filter(i => i.keep_title), labels = todo.filter(i => !i.keep_title);
+    const moves = keeps.filter(i => i.keep_move);
+    showModal(`
+        <h3>Apply to Rekordbox?</h3>
+        <p><b>${labels.length}</b> version label(s) will be added to titles, and <b>${keeps.length}</b> song(s) renamed${moves.length ? `, <b>${moves.length}</b> of them moved to another playlist (file and playlist)` : ''}.
+           The new titles are also written into the files' tags.</p>
+        ${moves.length ? `<ul>${moves.map(i => `<li>${esc(i.keep_title)} → <b>${esc(i.keep_move)}</b></li>`).join('')}</ul>` : ''}
+        <p class="warn">Rekordbox must be closed. A backup of its database is worth taking first.</p>
+        <div class="actions"><button class="btn" id="cancelApply">Cancel</button><button class="btn primary" id="confirmApply">Yes, apply</button></div>`);
+    $('cancelApply').onclick = closeModal;
+    $('confirmApply').onclick = runApply;
+}
+
+async function runApply() {
+    showModal('<h3>Applying…</h3><p>Writing to Rekordbox and the files. This takes a few seconds.</p>');
+    let d, ok = false;
+    try {
+        const r = await fetch('/api/review/apply-labels', { method: 'POST' });
+        ok = r.ok;
+        d = await r.json();
+    } catch (e) {
+        d = { detail: 'Could not reach the server: ' + e.message };
+    }
+    if (!ok) {
+        showModal(`<h3 class="bad">Nothing was changed</h3><p>${esc(d.detail || 'Something went wrong.')}</p>
+                   <div class="actions"><button class="btn primary" id="closeApply">OK</button></div>`);
+    } else {
+        showModal(`<h3>Done</h3>
+            <p><b>${d.applied.length}</b> track(s) updated${d.failed.length ? `, <span class="bad"><b>${d.failed.length}</b> could not be</span>` : ''}.</p>
+            ${d.applied.length ? `<ul>${d.applied.map(a => `<li>${esc(a.now)}</li>`).join('')}</ul>` : ''}
+            ${d.failed.length ? `<p class="bad">Not done:</p><ul>${d.failed.map(f => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}
+            <div class="actions"><button class="btn primary" id="closeApply">OK</button></div>`);
+    }
+    $('closeApply').onclick = async () => { closeModal(); await load(view[pos]?.id); };
 }
 
 function go(d) {
@@ -591,6 +636,7 @@ document.addEventListener('keydown', e => {
 $('filter').onchange = () => { stopAll(); pos = 0; applyFilter(); };
 $('undoBtn').onclick = undo;
 $('applyBtn').onclick = applyLabels;
+$('modalBg').addEventListener('click', e => { if (e.target === $('modalBg') && $('cancelApply')) closeModal(); });
 load();
 </script>
 </body>
