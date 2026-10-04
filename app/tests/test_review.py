@@ -280,5 +280,96 @@ class KeepAsDifferentSongTest(LabelTest):
         self.assertEqual(set_title.call_args.args[1], "Time After Time (Accapella)", "not the labelled Spotify title")
 
 
+class MoveToPlaylistTest(ReviewTest):
+    """A kept song that belongs in another playlist: file, Rekordbox entry and playlist all move."""
+
+    def pl(self):
+        return self.items["Pleasure Love"]["id"]
+
+    def entry(self):
+        return json.loads(review.MARKS_FILE.read_text(encoding="utf-8"))[self.pl()]
+
+    def setUp(self):
+        super().setUp()
+        state = json.loads(review.STATE_FILE.read_text(encoding="utf-8"))
+        state["playlists"]["p"]["variants"]["aiff"]["display_name"] = "beachbar sets (classic) AIFF"
+        state["playlists"]["p"]["variants"]["aiff"]["rb_playlist_id"] = "10"
+        state["playlists"]["q"] = {"variants": {"aiff": {"display_name": "Dub Reggae Bass Addict AIFF", "rb_playlist_id": "20", "tracks": {}}}}
+        review.STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        self.music = self.tmp / "Incoming"
+        mock.patch.object(review, "_music_folder", lambda: self.music).start()
+        mock.patch.object(review, "get_orchestrator", None).start()
+        # the file lives where the sync put it: in its playlist's folder
+        self.home = self.music / "beachbar sets (classic) AIFF"
+        self.home.mkdir(parents=True)
+        moved = self.home / "a.aiff"
+        self.new_a.replace(moved)
+        self.new_a = moved                  # the inherited ReviewTest tests look for the file where it now is
+        state = json.loads(review.STATE_FILE.read_text(encoding="utf-8"))
+        state["playlists"]["p"]["variants"]["aiff"]["tracks"]["t1"]["file_path"] = moved.as_posix()
+        review.STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        rows = list(csv.DictReader(review.AUDIT_FILE.open(newline="", encoding="utf-8-sig")))
+        rows[0]["new_file"] = str(moved)
+        with review.AUDIT_FILE.open("w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+            w.writeheader(); w.writerows(rows)
+        self.items = {i["title"]: i for i in review.load_items()}
+        self.moved = moved
+
+    def apply(self, **rb_results):
+        calls = {"update": rb_results.get("update", True)}
+        patches = {
+            "find_or_create_playlist": mock.Mock(return_value="20"),
+            "update_content_path": mock.Mock(return_value=calls["update"]),
+            "find_content_by_path": mock.Mock(return_value="content-1"),
+            "remove_track_from_playlist": mock.Mock(return_value=True),
+            "get_playlist_track_paths": mock.Mock(return_value={"x": "1", "y": "2"}),
+            "add_track_to_playlist": mock.Mock(return_value=True),
+            "set_title_by_path": mock.Mock(return_value=True),
+        }
+        with mock.patch.object(review, "_rekordbox_running", return_value=False), \
+             mock.patch("services.tagging.set_title", return_value=True), \
+             mock.patch.multiple("services.rekordbox", **patches):
+            result = review.review_apply_labels()
+        return result, patches
+
+    def test_the_playlist_menu_lists_the_playlists_sff_has_made(self):
+        self.assertEqual(review.review_playlists()["playlists"], ["Dub Reggae Bass Addict AIFF", "beachbar sets (classic) AIFF"])
+
+    def test_the_choice_is_saved_with_the_song(self):
+        review.review_note(review.Note(id=self.pl(), keep_title="Only Love", keep_move="Dub Reggae Bass Addict AIFF"))
+        self.assertEqual(self.entry()["keep"]["move_to"], "Dub Reggae Bass Addict AIFF")
+        self.assertEqual({i["title"]: i for i in review.load_items()}["Pleasure Love"]["keep_move"], "Dub Reggae Bass Addict AIFF")
+
+    def test_apply_moves_the_file_the_entry_and_the_playlist_membership(self):
+        review.review_note(review.Note(id=self.pl(), keep_artist="Saint Etienne", keep_title="Only Love Can Break Your Heart",
+                                       keep_move="Dub Reggae Bass Addict AIFF"))
+        result, rb = self.apply()
+        dest = self.music / "Dub Reggae Bass Addict AIFF" / "a.aiff"
+        self.assertTrue(dest.is_file() and not self.moved.exists(), "the file is now in the target playlist's folder")
+        rb["update_content_path"].assert_called_once_with(self.moved.as_posix(), dest.as_posix())
+        rb["remove_track_from_playlist"].assert_called_once_with("beachbar sets (classic) AIFF", "a.aiff")
+        rb["add_track_to_playlist"].assert_called_once_with("20", "content-1", 3)          # at the end
+        self.assertIn("Dub Reggae Bass Addict AIFF", result["applied"][0]["now"])
+        self.assertEqual(result["failed"], [])
+        state = json.loads(review.STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(state["playlists"]["q"]["variants"]["aiff"]["tracks"], {}, "NOT recorded against the target's Spotify list")
+        self.assertEqual(state["playlists"]["p"]["variants"]["aiff"]["tracks"], {}, "and no longer tied to the Spotify track")
+
+    def test_if_rekordbox_refuses_the_new_path_the_file_goes_back_where_it_was(self):
+        review.review_note(review.Note(id=self.pl(), keep_title="Only Love", keep_move="Dub Reggae Bass Addict AIFF"))
+        result, rb = self.apply(update=False)
+        self.assertTrue(self.moved.is_file(), "put back: Rekordbox must keep pointing at a real file")
+        self.assertFalse((self.music / "Dub Reggae Bass Addict AIFF" / "a.aiff").exists())
+        rb["add_track_to_playlist"].assert_not_called()
+        self.assertTrue(any("could not be moved" in f for f in result["failed"]), result["failed"])
+
+    def test_without_a_target_nothing_moves(self):
+        review.review_note(review.Note(id=self.pl(), keep_title="Only Love"))
+        result, rb = self.apply()
+        self.assertTrue(self.moved.is_file())
+        rb["update_content_path"].assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

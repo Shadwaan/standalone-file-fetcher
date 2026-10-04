@@ -144,6 +144,7 @@ let pos = 0;             // index into view
 let active = 'new';      // which source is "live" for the keyboard: 'new' or the chosen reference
 let refTab = 'yt';       // the reference shown on the right: 'yt' | 'old' | 'sp'
 try { refTab = localStorage.getItem('reviewRefTab') || 'yt'; } catch (e) {}
+let playlistOptions = [];
 let ytApiReady = false, ytPlayer = null, ytResults = [], ytIndex = 0, ytReady = false;
 
 const $ = id => document.getElementById(id);
@@ -152,6 +153,9 @@ const fmt = s => isFinite(s) && s != null ? Math.floor(s / 60) + ':' + String(Ma
 window.onYouTubeIframeAPIReady = () => { ytApiReady = true; if (refTab === 'yt' && view[pos]) mountYouTube(); };
 
 async function load(keepId) {
+    if (!playlistOptions.length) {
+        try { playlistOptions = (await (await fetch('/api/review/playlists')).json()).playlists || []; } catch (e) {}
+    }
     data = await (await fetch('/api/review/items')).json();
     applyFilter(keepId);
 }
@@ -236,6 +240,11 @@ function render() {
             <div class="keepfields" id="keepFields" hidden>
                 <label>Artist <input id="keepArtist" maxlength="120" autocomplete="off"></label>
                 <label>Title <input id="keepTitle" maxlength="160" autocomplete="off"></label>
+                <label style="grid-column: 1 / -1">Move it to another playlist <span>(optional — it does not belong in <b>${esc(it.playlist)}</b>?)</span>
+                    <select id="keepMove" style="width:100%;margin-top:4px">
+                        <option value="">Leave it where it is</option>
+                        ${playlistOptions.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}
+                    </select></label>
                 <div class="preview" id="keepPreview"></div>
             </div>
         </div>
@@ -442,8 +451,10 @@ function wireNotes(it) {
         const keep = $('keepBox').checked;
         it.keep_artist = keep ? art.value() : '';
         it.keep_title = keep ? ttl.value() : '';
+        it.keep_move = keep ? $('keepMove').value : '';
         await fetch('/api/review/note', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: it.id, label: it.label, note: it.note, keep_artist: it.keep_artist, keep_title: it.keep_title }) });
+            body: JSON.stringify({ id: it.id, label: it.label, note: it.note, keep_artist: it.keep_artist, keep_title: it.keep_title,
+                                   keep_move: it.keep_move }) });
         if (it.keep_title) it.mark = 'wrong';
         updatePending();
     };
@@ -457,7 +468,9 @@ function wireNotes(it) {
                            : (it.applied_label ? 'Label removed — the plain title is put back when you apply.' : ''));
         const a = art.value(), t = ttl.value();
         $('keepPreview').innerHTML = $('keepBox').checked
-            ? `Rekordbox will show: <b>${esc(a ? a + ' — ' : '')}${esc(t || '…')}</b>. The Spotify track “${esc(it.title)}” will be fetched again on the next sync.` : '';
+            ? `Rekordbox will show: <b>${esc(a ? a + ' — ' : '')}${esc(t || '…')}</b>` +
+              ($('keepMove').value ? `, moved to <b>${esc($('keepMove').value)}</b> (file and playlist). Sync leaves it there: it is not on Spotify, so it is never removed.` : '') +
+              `. The Spotify track “${esc(it.title)}” will be fetched again on the next sync.` : '';
     };
 
     const lab = suggestible($('labelInput'), it.suggested_label, it.label, () => { preview(); later(); });
@@ -467,6 +480,8 @@ function wireNotes(it) {
     const art = suggestible($('keepArtist'), it.suggested_artist, it.keep_artist, () => { preview(); later(); });
     const ttl = suggestible($('keepTitle'), it.suggested_title, it.keep_title, () => { preview(); later(); });
     const box = $('keepBox');
+    $('keepMove').value = it.keep_move || '';
+    $('keepMove').onchange = () => { preview(); later(0); };
     box.checked = !!it.keep_title;
     $('keepFields').hidden = !box.checked;
     box.onchange = () => {

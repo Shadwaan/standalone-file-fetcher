@@ -146,6 +146,7 @@ def load_items() -> list[dict]:
             "suggested_title": suggest_other(Path(new_file).stem)[1],
             "keep_artist": ((marks.get(iid) or {}).get("keep") or {}).get("artist", ""),
             "keep_title": ((marks.get(iid) or {}).get("keep") or {}).get("title", ""),
+            "keep_move": ((marks.get(iid) or {}).get("keep") or {}).get("move_to", ""),
             "applied_keep": bool((marks.get(iid) or {}).get("keep")) and (marks.get(iid) or {}).get("applied_keep") == (marks.get(iid) or {}).get("keep"),
         })
     return items
@@ -224,6 +225,7 @@ class Note(BaseModel):
     note: str = ""                # private note, kept here only
     keep_title: str = ""          # a completely different song that is being kept: its new title...
     keep_artist: str = ""         # ...and artist (empty title = not keeping it as a different song)
+    keep_move: str = ""           # optional: the playlist (e.g. "Dub Reggae Bass Addict AIFF") it belongs in instead
 
 
 # Set by main.py: the live SyncOrchestrator, whose in-memory state must be the one that is changed.
@@ -329,6 +331,8 @@ def review_note(body: Note):
         keep_title = " ".join(body.keep_title.split())
         if keep_title:
             entry["keep"] = {"title": keep_title, "artist": " ".join(body.keep_artist.split())}
+            if body.keep_move.strip():
+                entry["keep"]["move_to"] = body.keep_move.strip()
             if entry.get("mark") != "wrong":
                 entry["mark"] = "wrong"         # it is not the Spotify track, so it is wrong for that
                 entry["mark_from_keep"] = True  # remembered, so un-keeping can take it back
@@ -346,6 +350,69 @@ def review_note(body: Note):
 def _rekordbox_running() -> bool:
     from services.platform_paths import is_rekordbox_running
     return is_rekordbox_running()
+
+
+def _current_playlist_of(path: Path) -> str:
+    """The Rekordbox playlist (display name) the file is in, according to the sync state."""
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    orchestrator = get_orchestrator() if get_orchestrator else None
+    if orchestrator is not None:
+        state = orchestrator._state
+    target = path.as_posix().lower()
+    for pl in state.get("playlists", {}).values():
+        for variant in (pl.get("variants") or {}).values():
+            for rec in (variant.get("tracks") or {}).values():
+                if str(rec.get("file_path", "")).replace("\\", "/").lower() == target:
+                    return variant.get("display_name", "")
+    return ""
+
+
+def _music_folder() -> Path:
+    from services import app_config
+    return Path(app_config.get_music_folder())
+
+
+def _move_to_playlist(path: Path, target_name: str) -> str | None:
+    """Move a kept song to another playlist: the file into that playlist's folder, the track out of the
+    playlist it is in and into the target one. It is NOT recorded against the target's Spotify list, so
+    sync never mistakes it for a track that left Spotify and removes it. Returns the new path, or None."""
+    from services import rekordbox as rb
+    import shutil
+
+    source_name, old_name = _current_playlist_of(path), path.name
+    target_id = rb.find_or_create_playlist(target_name)
+    if not target_id:
+        return None
+    dest_dir = _music_folder() / target_name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    from services.audio_formats import unique_path
+    dest = unique_path(dest_dir, path.stem, path.suffix.lstrip("."))
+    shutil.move(str(path), str(dest))
+    if not rb.update_content_path(path.as_posix(), dest.as_posix()):
+        shutil.move(str(dest), str(path))                   # put the file back: Rekordbox must keep pointing at it
+        return None
+    content_id = rb.find_content_by_path(dest.as_posix())
+    if source_name:
+        rb.remove_track_from_playlist(source_name, old_name)
+    already_there = rb.get_playlist_track_paths(target_id)
+    if content_id and not rb.add_track_to_playlist(target_id, content_id, len(already_there) + 1):
+        return None
+    return dest.as_posix()
+
+
+@router.get("/api/review/playlists")
+def review_playlists():
+    """The playlists a kept song can be moved to (those sff has made, by name)."""
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"playlists": []}
+    names = sorted({v.get("display_name") for pl in state.get("playlists", {}).values()
+                    for v in (pl.get("variants") or {}).values() if v.get("rb_playlist_id") and v.get("display_name")})
+    return {"playlists": names}
 
 
 def _detach_from_spotify_track(path: Path) -> None:
@@ -392,10 +459,16 @@ def review_apply_labels():
                     continue
                 if rb.set_title_by_path(path.as_posix(), keep["title"], keep.get("artist") or None):
                     tagging.set_title(path, keep["title"], keep.get("artist") or None)
+                    moved_to = ""
+                    if keep.get("move_to"):
+                        moved_to = _move_to_playlist(path, keep["move_to"]) or ""
+                        if not moved_to:
+                            failed.append(item["title"] + " (renamed, but could not be moved to " + keep["move_to"] + ")")
                     _detach_from_spotify_track(path)
                     entry["applied_keep"] = keep
                     marks[item["id"]] = entry
-                    applied.append({"title": item["title"], "now": (keep.get("artist") + " - " if keep.get("artist") else "") + keep["title"]})
+                    now = (keep.get("artist") + " - " if keep.get("artist") else "") + keep["title"]
+                    applied.append({"title": item["title"], "now": now + (f"  →  {keep['move_to']}" if moved_to else "")})
                 else:
                     failed.append(item["title"])
                 continue

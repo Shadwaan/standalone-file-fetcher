@@ -1000,6 +1000,30 @@ def reorder_playlist_by_titles(playlist_id: str, ordered_titles: list[str]) -> i
         return 0
 
 
+def update_content_path(old_path: str, new_path: str) -> bool:
+    """Tell Rekordbox a track's file has moved (same track, new location). Rekordbox must be closed."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        content = db.session.query(tables.DjmdContent).filter_by(FolderPath=old_path.replace("\\", "/")).first()
+        if not content:
+            db.session.close()
+            db.engine.dispose()
+            return False
+        content.FolderPath = new_path.replace("\\", "/")
+        content.FileNameL = Path(new_path).name
+        content.updated_at = datetime.now(timezone.utc)
+        db.session.commit()
+        db.session.close()
+        db.engine.dispose()
+        return True
+    except Exception as e:
+        logger.error("Failed to update the path for '%s': %s", old_path, e)
+        return False
+
+
 def set_title_by_path(file_path: str, new_title: str, new_artist: str | None = None) -> bool:
     """Change the title (and, if given, the artist) Rekordbox shows for the track stored at `file_path`.
     Rekordbox must be closed."""

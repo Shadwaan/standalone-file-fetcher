@@ -1169,6 +1169,29 @@ class ReorderPlaylistTest(unittest.TestCase):
         self.assertEqual(self.run_reorder([], ["A"]), {})
 
 
+class ExtraTracksAreLeftAloneTest(SyncFixture):
+    """A song you put in a playlist yourself (or kept from the review page) is not on Spotify. A resync
+    must neither remove it nor go looking for it."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-real", "Real Song", "Somebody", 0)]
+        self.nico.offer("Somebody", "Real Song", "flac16", "u1", "m/01 - Real Song.flac", {"4": 44100, "5": 16})
+        extra = self.tmp / "Library" / "Kept Song.aiff.flac"
+        make_audio(extra, "song_b")
+        self.rbfake.add_existing_playlist("Deep tech AIFF", {"A Kept Different Song": str(extra).replace("\\", "/")})
+
+    def test_the_extra_survives_every_resync_and_is_never_searched_for(self):
+        for _ in range(3):
+            self.run_sync()
+        self.assertEqual(self.rbfake.removed, [], "never removed")
+        self.assertFalse(any("Kept" in q for q in self.nico.searches), "never searched for")
+        titles = [self.rbfake.contents[c]["title"] for c in next(
+            p for p in self.rbfake.playlists.values() if p["name"] == "Deep tech AIFF")["tracks"]]
+        self.assertEqual(sorted(titles), ["A Kept Different Song", "Real Song"], "and not duplicated")
+
+
 class FlacWithoutAttributesTest(unittest.TestCase):
     """A real '16BIT-WEB-FLAC' release came back with no bit depth and was rejected."""
 
