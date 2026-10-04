@@ -18,8 +18,9 @@ logger = logging.getLogger(__name__)
 SAME_SONG_REJECT_BELOW = 0.70
 SAME_SONG_WARN_BELOW = 0.93
 # A vocals-only track has next to no energy at 40-100 Hz (kick and bass): measured as that
-# band's share of the signal it is ~0.00-0.01, against a median of several tenths for real tracks.
-STEM_BASS_SHARE_BELOW = 0.02
+# band's share of the signal, a real acapella came out at 0.018, against 0.36-0.57 for the 30 real
+# tracks it was filed with. The line sits well clear of both.
+STEM_BASS_SHARE_BELOW = 0.08
 
 
 def _duration(path) -> float:
@@ -65,7 +66,7 @@ def bass_share(path):
     """Share of the signal that is 40-100 Hz, or None if the file is silent/too short."""
     bass = "highpass=f=40:poles=2,lowpass=f=100:poles=2,highpass=f=40:poles=2,lowpass=f=100:poles=2"
     full, low = _decode(path, 100), _decode(path, 100, bass)
-    if len(full) < 22050 * 10:
+    if len(full) < 22050 * 10 or len(low) == 0:
         return None
     full_rms = float(np.sqrt((full ** 2).mean()))
     return None if full_rms < 1e-5 else float(np.sqrt((low ** 2).mean())) / full_rms
