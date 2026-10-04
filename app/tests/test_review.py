@@ -59,15 +59,15 @@ class ReviewTest(unittest.TestCase):
 
     def test_a_mark_is_saved_and_can_be_cleared(self):
         iid = self.items["Pleasure Love"]["id"]
-        review.review_mark(review.Mark(id=iid, mark="youtube_right"))
-        self.assertEqual({i["title"]: i["mark"] for i in review.load_items()}["Pleasure Love"], "youtube_right")
+        review.review_mark(review.Mark(id=iid, mark="wrong"))
+        self.assertEqual({i["title"]: i["mark"] for i in review.load_items()}["Pleasure Love"], "wrong")
         self.assertEqual(review.review_items()["marked"], 1)
         review.review_mark(review.Mark(id=iid, mark=None))
         self.assertEqual(review.review_items()["marked"], 0)
 
     def test_an_unknown_mark_or_a_malformed_id_is_refused(self):
         with self.assertRaises(HTTPException):
-            review.review_mark(review.Mark(id=self.items["Pleasure Love"]["id"], mark="bananas"))
+            review.review_mark(review.Mark(id=self.items["Pleasure Love"]["id"], mark="both_ok"))
         with self.assertRaises(HTTPException):
             review.review_mark(review.Mark(id="../../etc/passwd", mark="both_ok"))
 
@@ -129,6 +129,16 @@ class ReviewTest(unittest.TestCase):
             with self.assertRaises(HTTPException) as ctx:
                 review.review_cover(self.items["Pleasure Love"]["id"])
         self.assertEqual(ctx.exception.status_code, 404)
+
+
+    def test_marks_from_the_old_four_choice_page_are_converted_not_lost(self):
+        review.MARKS_FILE.write_text(json.dumps({
+            "a" * 12: {"mark": "youtube_right"}, "b" * 12: {"mark": "neither"},
+            "c" * 12: {"mark": "new_right"}, "d" * 12: {"mark": "both_ok"}, "e" * 12: {"mark": "wrong"}}), encoding="utf-8")
+        self.assertEqual({k[0]: v["mark"] for k, v in review.load_marks().items()},
+                         {"a": "wrong", "b": "wrong", "c": "right", "d": "right", "e": "wrong"})
+        self.assertIn("wrong", review.MARKS_FILE.read_text(encoding="utf-8"), "and the file itself is rewritten")
+        self.assertNotIn("youtube_right", review.MARKS_FILE.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

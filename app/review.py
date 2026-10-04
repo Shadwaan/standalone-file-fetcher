@@ -2,8 +2,9 @@
 
 The audit of finished downloads (suspect_downloads_audit.csv) flags files that may be the wrong song,
 a vocals-only stem, or a different version. A similarity score can't settle the grey area, so this
-shows each flagged file next to the copy you already had (the YouTube MP3) and lets you listen to
-both and mark the result. Marks are kept in review_marks.json; nothing here changes your library.
+shows each flagged file next to the real track (YouTube video, Spotify, or the older MP3). The
+reference is always taken as right; the only question is whether the NEW file is. Marks are kept in
+review_marks.json; nothing here changes your library.
 """
 import csv
 import hashlib
@@ -27,11 +28,10 @@ CACHE_DIR = APP_DIR / ".review_cache"
 STATE_FILE = APP_DIR / "sync_state.json"
 PAGE = APP_DIR / "frontend" / "review.html"
 
+# The reference is the truth, so a new file can only match it or not.
 MARKS = {
-    "new_right": "The new file is the right song",
-    "youtube_right": "The YouTube copy is right (the new file is wrong)",
-    "both_ok": "Both fine (just a different version)",
-    "neither": "Neither is right",
+    "right": "The new file matches the real track",
+    "wrong": "The new file is wrong",
 }
 
 router = APIRouter()
@@ -103,11 +103,24 @@ def load_items() -> list[dict]:
     return items
 
 
+# The first version of this page had four choices. The reference is always right, so they collapse to
+# whether the NEW file is right or wrong; marks made under the old wording are converted, not lost.
+_LEGACY_MARKS = {"new_right": "right", "both_ok": "right", "youtube_right": "wrong", "neither": "wrong"}
+
+
 def load_marks() -> dict:
     try:
-        return json.loads(MARKS_FILE.read_text(encoding="utf-8"))
+        marks = json.loads(MARKS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if any(m.get("mark") in _LEGACY_MARKS for m in marks.values()):
+        for m in marks.values():
+            m["mark"] = _LEGACY_MARKS.get(m.get("mark"), m.get("mark"))
+        try:
+            MARKS_FILE.write_text(json.dumps(marks, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+    return marks
 
 
 def _paths(item_id: str) -> tuple[Path | None, Path | None]:
