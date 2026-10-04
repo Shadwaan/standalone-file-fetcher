@@ -81,6 +81,10 @@
                    padding: 9px 10px; font: inherit; }
     .notes input:focus { outline: none; border-color: #1db954; }
     .preview { grid-column: 1 / -1; font-size: 13px; color: #8a8a99; min-height: 1.3em; }
+    .filename { grid-column: 1 / -1; font-size: 13px; color: #aaa; word-break: break-all; background: #0e0e15; border: 1px solid #22222e;
+                border-radius: 8px; padding: 8px 10px; }
+    .filename b { color: #fff; font-weight: 600; }
+    .filename span { color: #777; }
     .preview b { color: #ffd166; font-weight: 600; }
     .row .tag { font-size: 11px; color: #ffd166; margin-left: 6px; }
     .notes input.suggested { color: #ffd166; font-style: italic; border-style: dashed; }
@@ -229,8 +233,9 @@ function render() {
             <button class="btn" data-jump="+10" title="Forward 10 seconds">+10s <kbd>]</kbd></button>
         </div>
         <div class="notes">
+            <div class="filename"><span>Downloaded file:</span> <b>${esc(it.new_name)}</b></div>
             <label>Version label <span>— a different mix of this song that you are keeping? <b>Tab</b> accepts the suggestion, <b>L</b> jumps here</span>
-                <input id="labelInput" maxlength="80" placeholder="e.g. CZR's Peak Hour Mix" autocomplete="off"></label>
+                <input id="labelInput" maxlength="80" placeholder="${it.suggested_label ? '' : 'the mix name, if the file name shows one'}" autocomplete="off"></label>
             <label>Private note <span>(only kept here)</span>
                 <input id="noteInput" maxlength="300" placeholder="anything you want to remember" autocomplete="off" value="${esc(it.note)}"></label>
             <div class="preview" id="labelPreview"></div>
