@@ -4,6 +4,35 @@ Watches your Spotify "FF"-prefixed playlists, downloads new tracks — from YouT
 
 ---
 
+## Moving your library to another computer (no re-downloading)
+
+Copying the music folder is not enough: the playlists, their order, the version labels, the songs you chose to keep
+and which labelled mixes sff is still looking for the real version of all live in Rekordbox and in sff's own records.
+The **manifest** carries all of it.
+
+**On the computer that has the playlists** (this only reads):
+
+```
+cd app
+python manifest.py export --music-root D:/Music/Incoming --out E:/Music/Incoming/sff_manifest.json
+```
+
+Copy the music (the playlist folders, not `_originals` / `_rejected`) and `sff_manifest.json` to the other computer or an SSD.
+Run the export again after any later change, so the manifest is current.
+
+**On the other computer** (install sff there first; **close Rekordbox**):
+
+```
+cd app
+python manifest.py import --manifest /Volumes/SSD/Music/Incoming/sff_manifest.json --music-root /Volumes/SSD/Music/Incoming
+```
+
+That first run is a **dry run**: it only prints what it found and what is missing. Add `--apply` to build the Rekordbox playlists
+(in order, with the exact titles) and to write sff's records using this computer's paths. Rekordbox's database is backed up first,
+and the import is safe to repeat. Nothing is downloaded, so later syncs there only fetch what is new.
+
+---
+
 ## How to use it
 
 ### 1. Install Python (one time)

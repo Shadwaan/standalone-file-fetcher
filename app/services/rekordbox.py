@@ -926,6 +926,32 @@ def get_library_files() -> list[tuple[str, str]]:
         return []
 
 
+def get_playlist_entries(playlist_id: str) -> list[dict]:
+    """Every track of a Rekordbox playlist, in playlist order: title, artist, album, year and file path."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        songs = db.session.query(tables.DjmdSongPlaylist).filter_by(PlaylistID=playlist_id).all()
+        out = []
+        for song in sorted(songs, key=lambda x: x.TrackNo or 0):
+            c = db.session.query(tables.DjmdContent).filter_by(ID=song.ContentID).first()
+            if not c:
+                continue
+            artist = db.session.query(tables.DjmdArtist).filter_by(ID=c.ArtistID).first() if c.ArtistID else None
+            album = db.session.query(tables.DjmdAlbum).filter_by(ID=c.AlbumID).first() if c.AlbumID else None
+            out.append({"title": c.Title or "", "path": c.FolderPath or "", "track_no": song.TrackNo,
+                        "artist": artist.Name if artist else "", "album": album.Name if album else "",
+                        "year": str(c.ReleaseYear or "")})
+        db.session.close()
+        db.engine.dispose()
+        return out
+    except Exception as e:
+        logger.warning("Failed to read the entries of playlist '%s': %s", playlist_id, e)
+        return []
+
+
 def get_playlist_track_titles(playlist_id: str) -> set[str]:
     """Titles of every track currently in a Rekordbox playlist -- the ground
     truth for "is this track already done", since it reads the durable
