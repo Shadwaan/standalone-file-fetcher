@@ -212,5 +212,73 @@ class LabelTest(ReviewTest):
         self.assertNotIn("applied_label", self.entry())
 
 
+class SuggestionTest(unittest.TestCase):
+    def test_a_version_label_is_suggested_from_the_file_name(self):
+        self.assertEqual(review.suggest_label("05 - I Feel for You (CZR\u2019s Peak Hour vocal mix)", "I Feel for You"),
+                         "CZR\u2019s Peak Hour vocal mix")
+        self.assertEqual(review.suggest_label("03 - Bob Sinclar - I Feel For You - CZR's Peak Hour Mix", "I Feel For You"),
+                         "CZR's Peak Hour Mix")
+
+    def test_nothing_is_suggested_when_there_is_no_new_version_in_the_name(self):
+        self.assertEqual(review.suggest_label("01 - Night Surfer (Original Mix)", "Night Surfer"), "")
+        self.assertEqual(review.suggest_label("Foo - Bar (Dub Mix)", "Bar (Dub Mix)"), "", "the title already has it")
+        self.assertEqual(review.suggest_label("13. Supafly & De Funk - Pleasure Love", "Pleasure Love"), "")
+
+    def test_a_different_song_is_named_from_the_file_name(self):
+        self.assertEqual(review.suggest_other("13. Supafly & De Funk - Pleasure Love"), ("Supafly & De Funk", "Pleasure Love"))
+        self.assertEqual(review.suggest_other("06._Babert_-_Time_After_Time_(Accapella)"), ("Babert", "Time After Time (Accapella)"))
+        self.assertEqual(review.suggest_other("01 - Night Surfer"), ("", "Night Surfer"), "no artist in the name: leave it as it is")
+
+
+class KeepAsDifferentSongTest(LabelTest):
+    """A completely different song that is kept: renamed in Rekordbox and the file, and unlinked from the Spotify track."""
+
+    def keep(self, artist="Babert", title="Time After Time (Accapella)"):
+        review.review_note(review.Note(id=self.pl(), keep_artist=artist, keep_title=title))
+
+    def test_keeping_marks_it_wrong_for_the_spotify_track_and_unkeeping_takes_that_back(self):
+        self.keep()
+        self.assertEqual(self.entry()["mark"], "wrong")
+        self.assertEqual(self.entry()["keep"], {"title": "Time After Time (Accapella)", "artist": "Babert"})
+        review.review_note(review.Note(id=self.pl()))
+        self.assertEqual(review.load_marks(), {}, "back to untouched")
+
+    def test_a_mark_you_set_yourself_survives_unkeeping(self):
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        self.keep()
+        review.review_note(review.Note(id=self.pl()))
+        self.assertEqual(self.entry(), {"mark": "wrong"})
+
+    def test_apply_renames_in_rekordbox_and_the_file_and_forgets_the_spotify_link(self):
+        self.keep()
+        saved = []
+        state = json.loads(review.STATE_FILE.read_text(encoding="utf-8"))
+        fake = mock.Mock(_state=state, _save_state=lambda: saved.append(json.loads(json.dumps(state))))
+        with mock.patch.object(review, "_rekordbox_running", return_value=False), \
+             mock.patch.object(review, "get_orchestrator", lambda: fake), \
+             mock.patch("services.rekordbox.set_title_by_path", return_value=True) as set_title, \
+             mock.patch("services.tagging.set_title", return_value=True) as tag_title:
+            result = review.review_apply_labels()
+            again = review.review_apply_labels()
+        self.assertEqual(result["applied"], [{"title": "Pleasure Love", "now": "Babert - Time After Time (Accapella)"}])
+        self.assertEqual(set_title.call_args.args[1:], ("Time After Time (Accapella)", "Babert"))
+        self.assertEqual(tag_title.call_args.args[1:], ("Time After Time (Accapella)", "Babert"))
+        tracks = state["playlists"]["p"]["variants"]["aiff"]["tracks"]
+        self.assertEqual(tracks, {}, "the Spotify track is no longer considered done, so the next sync fetches it")
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(again["applied"], [], "applied once only")
+        self.assertTrue({i["title"]: i for i in review.load_items()}["Pleasure Love"]["applied_keep"])
+
+    def test_keeping_beats_a_label_and_a_pending_count_reflects_it(self):
+        review.review_note(review.Note(id=self.pl(), label="Some Mix"))
+        self.keep()
+        with mock.patch.object(review, "_rekordbox_running", return_value=False), \
+             mock.patch.object(review, "get_orchestrator", lambda: None), \
+             mock.patch("services.rekordbox.set_title_by_path", return_value=True) as set_title, \
+             mock.patch("services.tagging.set_title", return_value=True):
+            review.review_apply_labels()
+        self.assertEqual(set_title.call_args.args[1], "Time After Time (Accapella)", "not the labelled Spotify title")
+
+
 if __name__ == "__main__":
     unittest.main()

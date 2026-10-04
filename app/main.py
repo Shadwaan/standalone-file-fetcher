@@ -63,6 +63,10 @@ def _get_orchestrator():
     return _orchestrator
 
 
+import review as _review_module  # noqa: E402
+_review_module.get_orchestrator = _get_orchestrator
+
+
 @app.get("/")
 async def index():
     """Serve the frontend UI. Cache-Control: no-cache forces the browser to

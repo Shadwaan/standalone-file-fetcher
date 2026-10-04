@@ -61,6 +61,41 @@ def _tracks_by_file() -> dict[str, dict]:
     return out
 
 
+# ---- suggestions, taken from the downloaded file's own name ---------------------------------------
+_TRACK_NUMBER = re.compile(r"^\s*(?:[\(\[]?[a-zA-Z]?\d{1,4}[\)\]]?[\.\-_\s]+){1,2}")
+_VERSION_WORD = re.compile(r"\b(mix|remix|edit|version|dub|rework|vip|instrumental|extended|radio|bootleg|club|remaster(?:ed)?"
+                           r"|live|acoustic)\b", re.IGNORECASE)
+_PLAIN_TAGS = {"original mix", "original version", "album version", "album mix"}
+
+
+def _clean_stem(stem: str) -> str:
+    """A file name without its track number, underscores or extension."""
+    text = _TRACK_NUMBER.sub("", stem.replace("_", " "))
+    return re.sub(r"\s+", " ", text).strip(" -")
+
+
+def suggest_label(stem: str, spotify_title: str) -> str:
+    """The version tag in the file's name that the Spotify title doesn't have, e.g.
+    'Bob Sinclar - I Feel For You (CZR's Peak Hour Mix)' -> "CZR's Peak Hour Mix". Empty if there is none."""
+    text, title = _clean_stem(stem), spotify_title.lower()
+    for group in reversed(re.findall(r"[\(\[]([^\)\]]+)[\)\]]", text)):
+        low = group.strip().lower()
+        if _VERSION_WORD.search(group) and low not in _PLAIN_TAGS and low not in title:
+            return group.strip()
+    match = re.search(r"\s-\s([^-]*\b(?:mix|remix|edit|version|dub)\b[^-]*)$", text, re.IGNORECASE)
+    if match and match.group(1).strip().lower() not in title:
+        return match.group(1).strip()
+    return ""
+
+
+def suggest_other(stem: str) -> tuple[str, str]:
+    """(artist, title) guessed from a file name: the number is dropped and 'Artist - Title' split.
+    The artist is empty when the name has only a title."""
+    text = _clean_stem(stem)
+    parts = re.split(r"\s+-\s+", text, maxsplit=1)
+    return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else ("", text)
+
+
 def _group(row: dict) -> str:
     verdict = row.get("verdict", "")
     try:
@@ -106,6 +141,12 @@ def load_items() -> list[dict]:
             "label": (marks.get(iid) or {}).get("label", ""),
             "note": (marks.get(iid) or {}).get("note", ""),
             "applied_label": (marks.get(iid) or {}).get("applied_label", ""),
+            "suggested_label": suggest_label(Path(new_file).stem, r.get("title", "")),
+            "suggested_artist": suggest_other(Path(new_file).stem)[0],
+            "suggested_title": suggest_other(Path(new_file).stem)[1],
+            "keep_artist": ((marks.get(iid) or {}).get("keep") or {}).get("artist", ""),
+            "keep_title": ((marks.get(iid) or {}).get("keep") or {}).get("title", ""),
+            "applied_keep": bool((marks.get(iid) or {}).get("keep")) and (marks.get(iid) or {}).get("applied_keep") == (marks.get(iid) or {}).get("keep"),
         })
     return items
 
@@ -181,6 +222,12 @@ class Note(BaseModel):
     id: str
     label: str = ""               # version label that goes into the Rekordbox title
     note: str = ""                # private note, kept here only
+    keep_title: str = ""          # a completely different song that is being kept: its new title...
+    keep_artist: str = ""         # ...and artist (empty title = not keeping it as a different song)
+
+
+# Set by main.py: the live SyncOrchestrator, whose in-memory state must be the one that is changed.
+get_orchestrator = None
 
 
 def _save_marks(marks: dict) -> None:
@@ -253,6 +300,7 @@ def review_mark(body: Mark):
     with _lock:
         marks = load_marks()
         entry = marks.get(body.id, {})
+        entry.pop("mark_from_keep", None)       # a mark you set yourself is yours to keep
         if body.mark is None:
             entry.pop("mark", None)
         else:
@@ -278,6 +326,15 @@ def review_note(body: Note):
                 entry[key] = value
             else:
                 entry.pop(key, None)
+        keep_title = " ".join(body.keep_title.split())
+        if keep_title:
+            entry["keep"] = {"title": keep_title, "artist": " ".join(body.keep_artist.split())}
+            if entry.get("mark") != "wrong":
+                entry["mark"] = "wrong"         # it is not the Spotify track, so it is wrong for that
+                entry["mark_from_keep"] = True  # remembered, so un-keeping can take it back
+        else:
+            if entry.pop("keep", None) is not None and entry.pop("mark_from_keep", False):
+                entry.pop("mark", None)
         if entry:
             marks[body.id] = entry
         else:
@@ -289,6 +346,30 @@ def review_note(body: Note):
 def _rekordbox_running() -> bool:
     from services.platform_paths import is_rekordbox_running
     return is_rekordbox_running()
+
+
+def _detach_from_spotify_track(path: Path) -> None:
+    """The file now holds a different song, so it no longer stands for the Spotify track it was
+    downloaded for: forget that link, and the next sync sees that track as missing and fetches it."""
+    orchestrator = get_orchestrator() if get_orchestrator else None
+    if orchestrator is not None:
+        state, save = orchestrator._state, orchestrator._save_state
+    else:
+        try:
+            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        save = lambda: STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")  # noqa: E731
+    target = path.as_posix().lower()
+    changed = False
+    for pl in state.get("playlists", {}).values():
+        for variant in (pl.get("variants") or {}).values():
+            for sid, rec in list((variant.get("tracks") or {}).items()):
+                if str(rec.get("file_path", "")).replace("\\", "/").lower() == target:
+                    del variant["tracks"][sid]
+                    changed = True
+    if changed:
+        save()
 
 
 @router.post("/api/review/apply-labels")
@@ -304,12 +385,25 @@ def review_apply_labels():
         marks = load_marks()
         for item in load_items():
             entry = marks.get(item["id"]) or {}
+            path = _paths(item["id"])[0]
+            keep = entry.get("keep")
+            if keep:                                    # a different song, kept under its own name
+                if entry.get("applied_keep") == keep:
+                    continue
+                if rb.set_title_by_path(path.as_posix(), keep["title"], keep.get("artist") or None):
+                    tagging.set_title(path, keep["title"], keep.get("artist") or None)
+                    _detach_from_spotify_track(path)
+                    entry["applied_keep"] = keep
+                    marks[item["id"]] = entry
+                    applied.append({"title": item["title"], "now": (keep.get("artist") + " - " if keep.get("artist") else "") + keep["title"]})
+                else:
+                    failed.append(item["title"])
+                continue
             label, done = entry.get("label", ""), entry.get("applied_label", "")
             if entry.get("mark") == "wrong" or label == done:
                 continue
-            path = _paths(item["id"])[0]
             title = with_label(item["title"], label)
-            if rb.set_title_by_path(str(path).replace("\\", "/"), title):
+            if rb.set_title_by_path(path.as_posix(), title):
                 tagging.set_title(path, title)
                 entry["applied_label"] = label
                 marks[item["id"]] = entry

@@ -961,6 +961,7 @@ def reorder_playlist_by_titles(playlist_id: str, ordered_titles: list[str]) -> i
         from pyrekordbox import Rekordbox6Database
         from pyrekordbox.db6 import tables
         from datetime import datetime, timezone
+        from services.labels import title_key
 
         db = Rekordbox6Database()
         songs = db.session.query(tables.DjmdSongPlaylist).filter_by(PlaylistID=playlist_id).all()
@@ -968,16 +969,23 @@ def reorder_playlist_by_titles(playlist_id: str, ordered_titles: list[str]) -> i
         for s in songs:
             c = db.session.query(tables.DjmdContent).filter_by(ID=s.ContentID).first()
             if c:
-                from services.labels import title_key
                 song_by_title[title_key(c.Title)] = s
 
         reordered = 0
         pos = 1
         for title in ordered_titles:
-            from services.labels import title_key
             song = song_by_title.get(title_key(title))
             if not song:
                 continue
+            if song.TrackNo != pos:
+                song.TrackNo = pos
+                song.updated_at = datetime.now(timezone.utc)
+                reordered += 1
+            pos += 1
+        # Tracks that are not in the Spotify list (a different song kept on purpose) go after it, in
+        # their existing order, so they can never collide with a number handed out above.
+        wanted = {id(song_by_title[k]) for k in (title_key(t) for t in ordered_titles) if k in song_by_title}
+        for song in sorted((s for s in songs if id(s) not in wanted), key=lambda s: s.TrackNo or 0):
             if song.TrackNo != pos:
                 song.TrackNo = pos
                 song.updated_at = datetime.now(timezone.utc)
@@ -992,8 +1000,9 @@ def reorder_playlist_by_titles(playlist_id: str, ordered_titles: list[str]) -> i
         return 0
 
 
-def set_title_by_path(file_path: str, new_title: str) -> bool:
-    """Change the title Rekordbox shows for the track stored at `file_path`. Rekordbox must be closed."""
+def set_title_by_path(file_path: str, new_title: str, new_artist: str | None = None) -> bool:
+    """Change the title (and, if given, the artist) Rekordbox shows for the track stored at `file_path`.
+    Rekordbox must be closed."""
     try:
         from pyrekordbox import Rekordbox6Database
         from pyrekordbox.db6 import tables
@@ -1005,6 +1014,8 @@ def set_title_by_path(file_path: str, new_title: str) -> bool:
             db.engine.dispose()
             return False
         content.Title = new_title
+        if new_artist:
+            content.ArtistID = _get_or_create_artist(db, tables, new_artist)
         content.updated_at = datetime.now(timezone.utc)
         db.session.commit()
         db.session.close()

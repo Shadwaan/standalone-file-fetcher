@@ -171,14 +171,17 @@ def _write_mp3(path: Path, track, artwork: bytes | None, carry: dict) -> None:
     _write_id3_audio(path, track, artwork, carry, MP3)
 
 
-def set_title(path: Path, title: str) -> bool:
-    """Change only the title tag of a file (FLAC, AIFF, WAV or MP3). False if it could not be done."""
+def set_title(path: Path, title: str, artist: str | None = None) -> bool:
+    """Change the title tag (and the artist tag, if given) of a file (FLAC, AIFF, WAV or MP3).
+    False if it could not be done."""
     try:
         ext = path.suffix.lower()
         if ext == ".flac":
             from mutagen.flac import FLAC
             f = FLAC(str(path))
             f["title"] = [title]
+            if artist:
+                f["artist"] = [artist]
             f.save()
         elif ext in (".aiff", ".aif", ".wav", ".mp3"):
             from mutagen import id3
@@ -192,6 +195,8 @@ def set_title(path: Path, title: str) -> bool:
             if f.tags is None:
                 f.add_tags()
             f.tags.setall("TIT2", [id3.TIT2(encoding=1, text=title)])
+            if artist:
+                f.tags.setall("TPE1", [id3.TPE1(encoding=1, text=artist)])
             f.save(v2_version=3)
         else:
             return False

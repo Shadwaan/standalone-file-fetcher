@@ -83,6 +83,18 @@
     .preview { grid-column: 1 / -1; font-size: 13px; color: #8a8a99; min-height: 1.3em; }
     .preview b { color: #ffd166; font-weight: 600; }
     .row .tag { font-size: 11px; color: #ffd166; margin-left: 6px; }
+    .notes input.suggested { color: #ffd166; font-style: italic; border-style: dashed; }
+    .keep { margin: 0 0 14px; padding: 10px 12px; border: 1px dashed #2a2a38; border-radius: 10px; }
+    .keep > label { font-size: 13px; color: #bbb; cursor: pointer; display: flex; gap: 8px; align-items: center; }
+    .keepfields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+    @media (max-width: 800px) { .keepfields { grid-template-columns: 1fr; } }
+    .keepfields label { font-size: 12px; color: #999; }
+    .keepfields input { width: 100%; margin-top: 4px; background: #0e0e15; color: #e8e8e8; border: 1px solid #2a2a38;
+                        border-radius: 8px; padding: 9px 10px; font: inherit; }
+    .keepfields input.suggested { color: #ffd166; font-style: italic; border-style: dashed; }
+    .keepfields input:focus { outline: none; border-color: #1db954; }
+    .keepfields .preview { grid-column: 1 / -1; }
+    .keepfields[hidden] { display: none; }
     .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #1f1f2c; border: 1px solid #3a3a4e;
              border-radius: 10px; padding: 10px 14px; display: none; gap: 14px; align-items: center; box-shadow: 0 8px 30px #000a;
              font-size: 14px; z-index: 10; max-width: 92vw; }
@@ -100,7 +112,7 @@
             <div class="track"><div class="fill" id="fill"></div></div>
             <div class="label" id="progressLabel"></div>
         </div>
-        <button class="btn" id="applyBtn" title="Write version labels into the Rekordbox titles (Rekordbox must be closed)">Apply labels to Rekordbox</button>
+        <button class="btn" id="applyBtn" title="Write version labels and renamed songs into Rekordbox (Rekordbox must be closed)">Apply to Rekordbox</button>
         <select id="filter" aria-label="Which tracks to show">
             <option value="unmarked">Unmarked only</option>
             <option value="all">All flagged</option>
@@ -213,11 +225,19 @@ function render() {
             <button class="btn" data-jump="+10" title="Forward 10 seconds">+10s <kbd>]</kbd></button>
         </div>
         <div class="notes">
-            <label>Version label <span>(optional — if this file is a different mix you are keeping, name it; it is added to the title in Rekordbox)</span>
-                <input id="labelInput" maxlength="80" placeholder="e.g. CZR's Peak Hour Mix" value="${esc(it.label)}"></label>
+            <label>Version label <span>— a different mix of this song that you are keeping? <b>Tab</b> accepts the suggestion, <b>L</b> jumps here</span>
+                <input id="labelInput" maxlength="80" placeholder="e.g. CZR's Peak Hour Mix" autocomplete="off"></label>
             <label>Private note <span>(only kept here)</span>
-                <input id="noteInput" maxlength="300" placeholder="anything you want to remember" value="${esc(it.note)}"></label>
+                <input id="noteInput" maxlength="300" placeholder="anything you want to remember" autocomplete="off" value="${esc(it.note)}"></label>
             <div class="preview" id="labelPreview"></div>
+        </div>
+        <div class="keep">
+            <label><input type="checkbox" id="keepBox"> It is a <b>completely different song</b> that I want to keep <span style="color:#666">(<b>O</b>)</span></label>
+            <div class="keepfields" id="keepFields" hidden>
+                <label>Artist <input id="keepArtist" maxlength="120" autocomplete="off"></label>
+                <label>Title <input id="keepTitle" maxlength="160" autocomplete="off"></label>
+                <div class="preview" id="keepPreview"></div>
+            </div>
         </div>
         <div class="marks">
             ${MARKS.map(([key, text, k]) => `<button class="btn mark ${key} ${it.mark === key ? 'on' : ''}" data-mark="${key}">${text}<kbd>${k}</kbd></button>`).join('')}
@@ -394,49 +414,88 @@ function wire(it) {
 
 let noteTimer = null;
 
-function labeledTitle(it) {
-    const label = $('labelInput').value.replace(/[\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
-    return label ? `${it.title} [${label}]` : it.title;
+function labeledTitle(it, label) {
+    const clean = label.replace(/[\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+    return clean ? `${it.title} [${clean}]` : it.title;
+}
+
+// A box can start with a SUGGESTION (dim, italic, dashed). It is only kept if you accept it:
+// Tab or Enter in the box, or typing. Leaving it alone saves nothing.
+function suggestible(input, suggestion, saved, onAccept) {
+    const state = { pending: !saved && !!suggestion };
+    input.value = saved || suggestion || '';
+    input.classList.toggle('suggested', state.pending);
+    const accept = () => { if (state.pending) { state.pending = false; input.classList.remove('suggested'); onAccept(); } };
+    input.addEventListener('keydown', e => {
+        if (e.key === 'Tab' || e.key === 'Enter') accept();
+        else if (e.key === 'Escape' && state.pending) { input.value = ''; state.pending = false; input.classList.remove('suggested'); onAccept(); }
+    });
+    input.addEventListener('input', () => { state.pending = false; input.classList.remove('suggested'); onAccept(); });
+    state.value = () => (state.pending ? '' : input.value.trim());
+    return state;
 }
 
 function wireNotes(it) {
-    const preview = () => {
-        const label = $('labelInput').value.trim();
-        $('labelPreview').innerHTML = label
-            ? `Rekordbox will show: <b>${esc(labeledTitle(it))}</b>` + (it.applied_label === label ? ' (already applied)' : ' — press “Apply labels to Rekordbox” when you are done')
-            : (it.applied_label ? 'Label removed — the plain title is put back when you apply.' : '');
-    };
     const save = async () => {
-        it.label = $('labelInput').value.trim();
+        it.label = lab.value();
         it.note = $('noteInput').value.trim();
+        const keep = $('keepBox').checked;
+        it.keep_artist = keep ? art.value() : '';
+        it.keep_title = keep ? ttl.value() : '';
         await fetch('/api/review/note', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                          body: JSON.stringify({ id: it.id, label: it.label, note: it.note }) });
+            body: JSON.stringify({ id: it.id, label: it.label, note: it.note, keep_artist: it.keep_artist, keep_title: it.keep_title }) });
+        if (it.keep_title) it.mark = 'wrong';
         updatePending();
     };
-    for (const id of ['labelInput', 'noteInput']) {
-        $(id).addEventListener('input', () => { preview(); clearTimeout(noteTimer); noteTimer = setTimeout(save, 600); });
-        $(id).addEventListener('blur', () => { clearTimeout(noteTimer); save(); });
-    }
+    const later = (ms = 600) => { clearTimeout(noteTimer); noteTimer = setTimeout(save, ms); };
+
+    const preview = () => {
+        const label = lab.value();
+        $('labelPreview').innerHTML = $('keepBox').checked ? ''
+            : label ? `Rekordbox will show: <b>${esc(labeledTitle(it, label))}</b>` + (it.applied_label === label ? ' (already applied)' : '')
+            : (lab.pending ? `Suggested from the file name: <b>${esc(labeledTitle(it, $('labelInput').value))}</b> — press Tab to use it.`
+                           : (it.applied_label ? 'Label removed — the plain title is put back when you apply.' : ''));
+        const a = art.value(), t = ttl.value();
+        $('keepPreview').innerHTML = $('keepBox').checked
+            ? `Rekordbox will show: <b>${esc(a ? a + ' — ' : '')}${esc(t || '…')}</b>. The Spotify track “${esc(it.title)}” will be fetched again on the next sync.` : '';
+    };
+
+    const lab = suggestible($('labelInput'), it.suggested_label, it.label, () => { preview(); later(); });
+    $('noteInput').addEventListener('input', () => later());
+    $('noteInput').addEventListener('blur', () => later(0));
+
+    const art = suggestible($('keepArtist'), it.suggested_artist, it.keep_artist, () => { preview(); later(); });
+    const ttl = suggestible($('keepTitle'), it.suggested_title, it.keep_title, () => { preview(); later(); });
+    const box = $('keepBox');
+    box.checked = !!it.keep_title;
+    $('keepFields').hidden = !box.checked;
+    box.onchange = () => {
+        $('keepFields').hidden = !box.checked;
+        if (box.checked) { art.pending = ttl.pending = false; $('keepArtist').classList.remove('suggested'); $('keepTitle').classList.remove('suggested'); }
+        preview(); later(0);
+        if (box.checked) $('keepTitle').focus();
+    };
+    lab.pending = lab.pending;
     preview();
 }
 
 function pendingLabels() {
-    return data.items.filter(i => i.mark !== 'wrong' && (i.label || '') !== (i.applied_label || '')).length;
+    return data.items.filter(i => i.keep_title ? !i.applied_keep : (i.mark !== 'wrong' && (i.label || '') !== (i.applied_label || ''))).length;
 }
 
 function updatePending() {
     const n = pendingLabels();
-    $('applyBtn').textContent = n ? `Apply labels to Rekordbox (${n})` : 'Apply labels to Rekordbox';
+    $('applyBtn').textContent = n ? `Apply to Rekordbox (${n})` : 'Apply to Rekordbox';
     $('applyBtn').disabled = n === 0;
 }
 
 async function applyLabels() {
-    if (!confirm('Write the version labels into the titles in Rekordbox (and the files)? Rekordbox must be closed.')) return;
+    if (!confirm('Write the version labels and renamed songs into Rekordbox (and the files)? Rekordbox must be closed.')) return;
     $('applyBtn').disabled = true;
     const r = await fetch('/api/review/apply-labels', { method: 'POST' });
     const d = await r.json();
-    if (!r.ok) { toast(d.detail || 'Could not apply the labels.'); updatePending(); return; }
-    toast(`Labels applied to ${d.applied.length} track(s)` + (d.failed.length ? ` — ${d.failed.length} not found in Rekordbox: ${d.failed.join(', ')}` : '.'));
+    if (!r.ok) { toast(d.detail || 'Could not apply the changes.'); updatePending(); return; }
+    toast(`Applied to ${d.applied.length} track(s)` + (d.failed.length ? ` — ${d.failed.length} not found in Rekordbox: ${d.failed.join(', ')}` : '.'));
     await load(view[pos]?.id);
 }
 
@@ -501,6 +560,8 @@ document.addEventListener('keydown', e => {
     else if (e.key === 'Tab') { e.preventDefault(); switchAB(); }
     else if (e.key === '1' || e.key === '2') { mark(it, MARKS[Number(e.key) - 1][0]); }
     else if (e.key === 'u' || e.key === 'U') undo();
+    else if (e.key === 'l' || e.key === 'L') { e.preventDefault(); $('labelInput').focus(); $('labelInput').select(); }
+    else if (e.key === 'o' || e.key === 'O') { e.preventDefault(); const b = $('keepBox'); b.checked = true; b.onchange(); }
     else if (e.key === 'ArrowRight') go(1);
     else if (e.key === 'ArrowLeft') go(-1);
     else if (e.key === '[') jump('-10');

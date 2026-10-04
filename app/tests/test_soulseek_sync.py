@@ -1115,6 +1115,60 @@ class VersionLabelTest(SyncFixture):
         self.assertEqual(len(list(self.music.rglob("*.aiff"))), 1)
 
 
+class ReorderPlaylistTest(unittest.TestCase):
+    """reorder_playlist_by_titles renumbers a real Rekordbox playlist, so it is tested against a stand-in database."""
+
+    def run_reorder(self, in_playlist, ordered_titles):
+        import types
+
+        class Song:
+            def __init__(self, content_id, track_no):
+                self.ContentID, self.TrackNo, self.updated_at = content_id, track_no, None
+
+        class Content:
+            def __init__(self, cid, title):
+                self.ID, self.Title = cid, title
+
+        songs = [Song(f"c{i}", no) for i, (title, no) in enumerate(in_playlist)]
+        contents = {f"c{i}": Content(f"c{i}", title) for i, (title, no) in enumerate(in_playlist)}
+
+        class Query:
+            def __init__(self, table): self.table, self.kw = table, {}
+            def filter_by(self, **kw): self.kw = kw; return self
+            def all(self): return songs
+            def first(self): return contents.get(self.kw.get("ID"))
+
+        class Session:
+            committed = False
+            def query(self, table): return Query(table)
+            def commit(self): Session.committed = True
+            def close(self): pass
+
+        class Database:
+            session = Session()
+            engine = types.SimpleNamespace(dispose=lambda: None)
+
+        tables = types.SimpleNamespace(DjmdSongPlaylist="songs", DjmdContent="content")
+        fake_pyrekordbox = types.SimpleNamespace(Rekordbox6Database=Database)
+        fake_db6 = types.SimpleNamespace(tables=tables)
+        with mock.patch.dict(sys.modules, {"pyrekordbox": fake_pyrekordbox, "pyrekordbox.db6": fake_db6}):
+            rb.reorder_playlist_by_titles("pl", ordered_titles)
+        self.assertTrue(Session.committed, "the renumbering must be committed (an exception would silently skip it)")
+        return {contents[s.ContentID].Title: s.TrackNo for s in songs}
+
+    def test_tracks_are_numbered_in_spotify_order(self):
+        result = self.run_reorder([("B", 1), ("A", 2), ("C", 3)], ["A", "B", "C"])
+        self.assertEqual(result, {"A": 1, "B": 2, "C": 3})
+
+    def test_a_labelled_title_is_still_found_and_a_kept_extra_goes_to_the_end_without_colliding(self):
+        result = self.run_reorder([("Kept Other Song", 2), ("B [Some Mix]", 1), ("A", 3)], ["A", "B", "C"])
+        self.assertEqual(result, {"A": 1, "B [Some Mix]": 2, "Kept Other Song": 3})
+        self.assertEqual(len(set(result.values())), 3, "no two tracks share a number")
+
+    def test_an_empty_playlist_does_not_crash(self):
+        self.assertEqual(self.run_reorder([], ["A"]), {})
+
+
 class FlacWithoutAttributesTest(unittest.TestCase):
     """A real '16BIT-WEB-FLAC' release came back with no bit depth and was rejected."""
 
