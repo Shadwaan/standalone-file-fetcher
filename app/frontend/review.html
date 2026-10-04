@@ -86,6 +86,8 @@
     .filename b { color: #fff; font-weight: 600; }
     .filename span { color: #777; }
     .preview b { color: #ffd166; font-weight: 600; }
+    .notes label.finalrow { grid-column: 1 / -1; display: flex; gap: 8px; align-items: baseline; color: #bbb; font-size: 13px; cursor: pointer; }
+    .notes label.finalrow span { color: #777; font-size: 12px; }
     .row .tag { font-size: 11px; color: #ffd166; margin-left: 6px; }
     .notes input.suggested { color: #ffd166; font-style: italic; border-style: dashed; }
     .keep { margin: 0 0 14px; padding: 10px 12px; border: 1px dashed #2a2a38; border-radius: 10px; }
@@ -250,6 +252,8 @@ function render() {
                 <input id="labelInput" maxlength="80" placeholder="${it.suggested_label ? '' : 'the mix name, if the file name shows one'}" autocomplete="off"></label>
             <label>Private note <span>(only kept here)</span>
                 <input id="noteInput" maxlength="300" placeholder="anything you want to remember" autocomplete="off" value="${esc(it.note)}"></label>
+            <label class="finalrow"><input type="checkbox" id="finalBox"> This mix is the one I want — stop looking for the Spotify version
+                <span>(otherwise sff keeps this as a stand-in and goes on searching for the mix Spotify lists)</span></label>
             <div class="preview" id="labelPreview"></div>
         </div>
         <div class="keep">
@@ -464,6 +468,7 @@ function suggestible(input, suggestion, saved, onAccept) {
 function wireNotes(it) {
     const save = async () => {
         it.label = lab.value();
+        it.final = $('finalBox').checked;
         it.note = $('noteInput').value.trim();
         const keep = $('keepBox').checked;
         it.keep_artist = keep ? art.value() : '';
@@ -471,7 +476,7 @@ function wireNotes(it) {
         it.keep_move = keep ? $('keepMove').value : '';
         await fetch('/api/review/note', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: it.id, label: it.label, note: it.note, keep_artist: it.keep_artist, keep_title: it.keep_title,
-                                   keep_move: it.keep_move }) });
+                                   keep_move: it.keep_move, final: it.final }) });
         if (it.keep_title) it.mark = 'wrong';
         updatePending();
     };
@@ -491,6 +496,8 @@ function wireNotes(it) {
     };
 
     const lab = suggestible($('labelInput'), it.suggested_label, it.label, () => { preview(); later(); });
+    $('finalBox').checked = !!it.final;
+    $('finalBox').onchange = () => { it.final = $('finalBox').checked; later(0); };
     $('noteInput').addEventListener('input', () => later());
     $('noteInput').addEventListener('blur', () => later(0));
 
@@ -511,9 +518,11 @@ function wireNotes(it) {
     preview();
 }
 
+function standInPending(i) { return (!!i.label && !i.final) !== !!i.standin_set; }
+
 function pendingLabels() {
     return data.items.filter(i => i.keep_title ? !i.applied_keep
-        : i.mark === 'wrong' ? !i.rejected : ((i.label || '') !== (i.applied_label || ''))).length;
+        : i.mark === 'wrong' ? !i.rejected : ((i.label || '') !== (i.applied_label || '') || standInPending(i))).length;
 }
 
 function updatePending() {
@@ -528,13 +537,15 @@ function closeModal() { $('modalBg').classList.remove('show'); }
 // An in-page confirmation: the browser's own confirm() popup is blocked in some browsers (it then
 // answers "no" without showing anything, which made this button look dead).
 function applyLabels() {
-    const todo = data.items.filter(i => i.keep_title ? !i.applied_keep : (i.mark !== 'wrong' && (i.label || '') !== (i.applied_label || '')));
+    const todo = data.items.filter(i => i.keep_title ? !i.applied_keep : (i.mark !== 'wrong' && ((i.label || '') !== (i.applied_label || '') || standInPending(i))));
     const keeps = todo.filter(i => i.keep_title), labels = todo.filter(i => !i.keep_title);
     const wrongs = data.items.filter(i => i.mark === 'wrong' && !i.keep_title && !i.rejected);
+    const standIns = labels.filter(i => i.label && !i.final && !i.standin_set);
     const moves = keeps.filter(i => i.keep_move);
     showModal(`
         <h3>Apply to Rekordbox?</h3>
         ${wrongs.length ? `<p><b>${wrongs.length}</b> file(s) marked wrong will be <b>taken out of their playlists</b> and put aside in a <code>_rejected</code> folder (never deleted); the next sync fetches the right ones.</p>` : ''}
+        ${standIns.length ? `<p><b>${standIns.length}</b> labelled mix(es) become <b>stand-ins</b>: they stay in the playlist, and the next sync goes on looking for the mix Spotify actually lists, adding it alongside. (Tick “this mix is the one I want” on a track to stop that.)</p>` : ''}
         <p><b>${labels.length}</b> version label(s) will be added to titles, and <b>${keeps.length}</b> song(s) renamed${moves.length ? `, <b>${moves.length}</b> of them moved to another playlist (file and playlist)` : ''}.
            The new titles are also written into the files' tags.</p>
         ${moves.length ? `<ul>${moves.map(i => `<li>${esc(i.keep_title)} → <b>${esc(i.keep_move)}</b></li>`).join('')}</ul>` : ''}

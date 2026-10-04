@@ -148,6 +148,8 @@ def load_items() -> list[dict]:
             "keep_title": ((marks.get(iid) or {}).get("keep") or {}).get("title", ""),
             "keep_move": ((marks.get(iid) or {}).get("keep") or {}).get("move_to", ""),
             "rejected": bool((marks.get(iid) or {}).get("rejected")),
+            "final": bool((marks.get(iid) or {}).get("final")),
+            "standin_set": bool((marks.get(iid) or {}).get("standin_set")),
             "applied_keep": bool((marks.get(iid) or {}).get("keep")) and (marks.get(iid) or {}).get("applied_keep") == (marks.get(iid) or {}).get("keep"),
         })
     return items
@@ -227,6 +229,7 @@ class Note(BaseModel):
     keep_title: str = ""          # a completely different song that is being kept: its new title...
     keep_artist: str = ""         # ...and artist (empty title = not keeping it as a different song)
     keep_move: str = ""           # optional: the playlist (e.g. "Dub Reggae Bass Addict AIFF") it belongs in instead
+    final: bool = False           # a labelled mix that is the version wanted: stop looking for the Spotify one
 
 
 # Set by main.py: the live SyncOrchestrator, whose in-memory state must be the one that is changed.
@@ -329,6 +332,10 @@ def review_note(body: Note):
                 entry[key] = value
             else:
                 entry.pop(key, None)
+        if body.final:
+            entry["final"] = True
+        else:
+            entry.pop("final", None)
         keep_title = " ".join(body.keep_title.split())
         if keep_title:
             entry["keep"] = {"title": keep_title, "artist": " ".join(body.keep_artist.split())}
@@ -461,6 +468,34 @@ def review_playlists():
     return {"playlists": names}
 
 
+def _set_stand_in(path: Path, on: bool, label: str = "") -> bool:
+    """Flag (or unflag) the sync-state record of a file as a stand-in for the Spotify mix."""
+    orchestrator = get_orchestrator() if get_orchestrator else None
+    if orchestrator is not None:
+        state, save = orchestrator._state, orchestrator._save_state
+    else:
+        try:
+            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        save = lambda: STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")  # noqa: E731
+    target = path.as_posix().lower()
+    changed = False
+    for pl in state.get("playlists", {}).values():
+        for variant in (pl.get("variants") or {}).values():
+            for rec in (variant.get("tracks") or {}).values():
+                if str(rec.get("file_path", "")).replace("\\", "/").lower() == target:
+                    if on:
+                        rec["stand_in"], rec["stand_in_label"] = True, label
+                    else:
+                        rec.pop("stand_in", None)
+                        rec.pop("stand_in_label", None)
+                    changed = True
+    if changed:
+        save()
+    return changed
+
+
 def _detach_from_spotify_track(path: Path) -> None:
     """The file now holds a different song, so it no longer stands for the Spotify track it was
     downloaded for: forget that link, and the next sync sees that track as missing and fetches it."""
@@ -530,15 +565,24 @@ def review_apply_labels():
                     failed.append(item["title"] + " (could not be removed)")
                 continue
             label, done = entry.get("label", ""), entry.get("applied_label", "")
-            if label == done:
-                continue
-            title = with_label(item["title"], label)
-            if rb.set_title_by_path(path.as_posix(), title):
-                tagging.set_title(path, title)
-                entry["applied_label"] = label
-                marks[item["id"]] = entry
-                applied.append({"title": item["title"], "now": title})
-            else:
-                failed.append(item["title"])
+            if label != done:
+                title = with_label(item["title"], label)
+                if rb.set_title_by_path(path.as_posix(), title):
+                    tagging.set_title(path, title)
+                    entry["applied_label"] = label
+                    marks[item["id"]] = entry
+                    applied.append({"title": item["title"], "now": title})
+                else:
+                    failed.append(item["title"])
+                    continue
+            # A labelled mix is a STAND-IN: sff keeps looking for the mix Spotify lists, unless this is the one wanted.
+            wants_stand_in = bool(label) and not entry.get("final")
+            if wants_stand_in != entry.get("standin_set", False):
+                if _set_stand_in(path, wants_stand_in, label):
+                    entry["standin_set"] = wants_stand_in
+                    marks[item["id"]] = entry
+                    applied.append({"title": item["title"],
+                                    "now": "stand-in: sff keeps looking for the Spotify mix" if wants_stand_in
+                                           else "final: sff stops looking for another version"})
         _save_marks(marks)
     return {"applied": applied, "failed": failed}

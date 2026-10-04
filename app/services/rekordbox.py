@@ -965,11 +965,15 @@ def reorder_playlist_by_titles(playlist_id: str, ordered_titles: list[str]) -> i
 
         db = Rekordbox6Database()
         songs = db.session.query(tables.DjmdSongPlaylist).filter_by(PlaylistID=playlist_id).all()
-        song_by_title = {}
+        song_by_title, labelled = {}, {}
         for s in songs:
             c = db.session.query(tables.DjmdContent).filter_by(ID=s.ContentID).first()
             if c:
-                song_by_title[title_key(c.Title)] = s
+                key = title_key(c.Title)
+                is_labelled = (c.Title or "").strip() != key
+                # a stand-in ("Title [label]") and the real "Title" share a key: the real one takes the position
+                if key not in song_by_title or (labelled[key] and not is_labelled):
+                    song_by_title[key], labelled[key] = s, is_labelled
 
         reordered = 0
         pos = 1

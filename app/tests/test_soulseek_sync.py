@@ -1116,13 +1116,13 @@ class VersionLabelTest(SyncFixture):
         self.assertEqual(self.rbfake.imports, [])
         self.assertEqual(result["tracks_failed"], 0)
 
-    def test_the_same_playlist_in_another_format_also_counts_when_labelled(self):
+    def test_a_labelled_entry_in_another_formats_playlist_is_a_stand_in_not_a_source(self):
         flac = self.tmp / "Library" / "x.flac"
         make_audio(flac, "song_a")
         self.rbfake.add_existing_playlist("Deep tech FLAC", {"I Feel For You [CZR's Peak Hour Mix]": str(flac).replace("\\", "/")})
         self.run_sync()
-        self.assertEqual(self.nico.searches, [], "derived from the FLAC twin, found despite the label")
-        self.assertEqual(len(list(self.music.rglob("*.aiff"))), 1)
+        self.assertNotEqual(self.nico.searches, [], "a different mix is not turned into the track Spotify lists")
+        self.assertEqual(list(self.music.rglob("*.aiff")), [])
 
 
 class ReorderPlaylistTest(unittest.TestCase):
@@ -1178,6 +1178,12 @@ class ReorderPlaylistTest(unittest.TestCase):
     def test_an_empty_playlist_does_not_crash(self):
         self.assertEqual(self.run_reorder([], ["A"]), {})
 
+    def test_a_stand_in_and_the_real_mix_with_the_same_title_the_real_one_takes_the_spotify_position(self):
+        result = self.run_reorder([("B", 1), ("A [Other Mix]", 2), ("A", 3)], ["A", "B"])
+        self.assertEqual(result, {"A": 1, "B": 2, "A [Other Mix]": 3})
+        result = self.run_reorder([("A", 1), ("A [Other Mix]", 2), ("B", 3)], ["A", "B"])
+        self.assertEqual(result, {"A": 1, "B": 2, "A [Other Mix]": 3}, "whatever order they were in")
+
 
 class ExtraTracksAreLeftAloneTest(SyncFixture):
     """A song you put in a playlist yourself (or kept from the review page) is not on Spotify. A resync
@@ -1200,6 +1206,81 @@ class ExtraTracksAreLeftAloneTest(SyncFixture):
         titles = [self.rbfake.contents[c]["title"] for c in next(
             p for p in self.rbfake.playlists.values() if p["name"] == "Deep tech AIFF")["tracks"]]
         self.assertEqual(sorted(titles), ["A Kept Different Song", "Real Song"], "and not duplicated")
+
+
+class StandInTrackTest(SyncFixture):
+    """A labelled different mix keeps its place, and sff goes on looking for the mix Spotify actually lists."""
+
+    TITLE, ARTIST = "Lady", "Modjo"
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-lady", self.TITLE, self.ARTIST, 0),
+                               spotify_track(0, "id-other", "Other Song", "Somebody", 1)]
+        # first sync: only a different mix of "Lady" exists, and the other song
+        self.nico.offer(self.ARTIST, self.TITLE, "song_b", "u1", "m/01 - Modjo - Lady.flac", {"4": 44100, "5": 16})
+        self.nico.offer("Somebody", "Other Song", "song_a", "u2", "m/02 - Other Song.flac", {"4": 44100, "5": 16})
+        self.run_sync()
+        self.make_it_a_stand_in()
+
+    def make_it_a_stand_in(self):
+        """What the review page's Apply does: a labelled title in Rekordbox, a stand-in flag in the state."""
+        for c in self.rbfake.contents.values():
+            if c["title"] == self.TITLE:
+                c["title"] = f"{self.TITLE} [Original Recipe]"
+        state = json.loads((self.tmp / "sync_state.json").read_text(encoding="utf-8"))
+        record = next(iter(state["playlists"].values()))["variants"]["aiff"]["tracks"]["id-lady"]
+        record["stand_in"] = True
+        (self.tmp / "sync_state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.rbfake.imports.clear()
+        self.nico.searches.clear()
+
+    def playlist_titles(self):
+        pl = next(p for p in self.rbfake.playlists.values() if p["name"] == "Deep tech AIFF")
+        return sorted(self.rbfake.contents[c]["title"] for c in pl["tracks"])
+
+    def test_it_is_searched_for_again_even_though_a_labelled_file_is_in_the_playlist(self):
+        self.orchestrator().run_sync()
+        self.assertIn(soulseek._build_query(self.ARTIST, self.TITLE), self.nico.searches)
+        self.assertNotIn(soulseek._build_query("Somebody", "Other Song"), self.nico.searches, "the finished track is left alone")
+
+    def test_the_real_mix_is_added_alongside_the_stand_in_which_stays(self):
+        self.nico.offer(self.ARTIST, self.TITLE, "song_a", "u3", "m/03 - Modjo - Lady.flac", {"4": 44100, "5": 16})
+        self.nico.searches.clear()
+        self.orchestrator().run_sync()
+        self.assertEqual(self.playlist_titles(), [self.TITLE, f"{self.TITLE} [Original Recipe]", "Other Song"].__class__(
+            sorted([self.TITLE, f"{self.TITLE} [Original Recipe]", "Other Song"])))
+        self.assertEqual([t.title for t, _ in self.rbfake.imports], [self.TITLE], "imported with the plain Spotify title")
+        record = next(iter(json.loads((self.tmp / "sync_state.json").read_text(encoding="utf-8"))["playlists"].values()))["variants"]["aiff"]["tracks"]["id-lady"]
+        self.assertNotIn("stand_in", record, "no longer a stand-in: the real one is there")
+
+    def test_once_the_real_mix_is_there_it_is_not_searched_for_again(self):
+        self.nico.offer(self.ARTIST, self.TITLE, "song_a", "u3", "m/03 - Modjo - Lady.flac", {"4": 44100, "5": 16})
+        self.orchestrator().run_sync()
+        self.nico.searches.clear()
+        self.rbfake.imports.clear()
+        self.orchestrator().run_sync()
+        self.assertEqual((self.nico.searches, self.rbfake.imports), ([], []))
+
+    def test_if_the_real_mix_cannot_be_found_the_stand_in_is_kept_and_nothing_breaks(self):
+        result = self.orchestrator().run_sync()
+        self.assertEqual(result["status"], "done")
+        self.assertIn(f"{self.TITLE} [Original Recipe]", self.playlist_titles())
+        self.assertEqual(self.rbfake.removed, [], "the stand-in is never removed")
+        record = next(iter(json.loads((self.tmp / "sync_state.json").read_text(encoding="utf-8"))["playlists"].values()))["variants"]["aiff"]["tracks"]["id-lady"]
+        self.assertTrue(record.get("stand_in"), "still a stand-in")
+
+    def test_the_stand_in_file_is_never_used_as_the_source_of_the_real_track(self):
+        self.orchestrator().run_sync()
+        self.assertEqual(self.rbfake.imports, [], "the different mix was not re-imported as the track")
+
+    def test_a_final_labelled_mix_is_left_alone(self):
+        state = json.loads((self.tmp / "sync_state.json").read_text(encoding="utf-8"))
+        next(iter(state["playlists"].values()))["variants"]["aiff"]["tracks"]["id-lady"].pop("stand_in")
+        (self.tmp / "sync_state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.orchestrator().run_sync()
+        self.assertEqual(self.nico.searches, [], "marked final: nothing to look for")
 
 
 class FlacWithoutAttributesTest(unittest.TestCase):

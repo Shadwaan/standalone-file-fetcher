@@ -71,7 +71,8 @@ def _inspect_variant(pl_state: dict, fmt: str, base_name: str, tracks: list, cur
     v["display_name"] = name or wanted
 
     # keyed ignoring a trailing "[version label]": a title we labelled is still the same track
-    in_rekordbox = {title_key(t): p for t, p in (rb.get_playlist_track_paths(pid) if pid else {}).items()}
+    raw_titles = rb.get_playlist_track_paths(pid) if pid else {}
+    in_rekordbox = {title_key(t): p for t, p in raw_titles.items()}
     known_ids = set(v["tracks"])
 
     # Rekordbox has it but our state never heard of it (e.g. a playlist built by
@@ -84,7 +85,21 @@ def _inspect_variant(pl_state: dict, fmt: str, base_name: str, tracks: list, cur
                 "artist": t.artist, "title": t.title,
             }
 
-    new_tracks = [t for t in tracks if t.spotify_id not in v["tracks"] and title_key(t.title) not in in_rekordbox]
+    # A STAND-IN is a different mix kept (and labelled) in place of the one Spotify lists. It holds the
+    # place, but the track is not done: it keeps being searched for, until a file carrying the plain
+    # Spotify title (the real one) is in the playlist.
+    new_tracks = []
+    for t in tracks:
+        record = v["tracks"].get(t.spotify_id)
+        if record is None:
+            if title_key(t.title) not in in_rekordbox:
+                new_tracks.append(t)
+        elif record.get("stand_in"):
+            real = raw_titles.get(t.title)
+            if real and Path(real) != Path(record.get("file_path") or ""):
+                v["tracks"][t.spotify_id] = {"filename": Path(real).name, "file_path": real, "artist": t.artist, "title": t.title}
+            else:
+                new_tracks.append(t)
     return _Variant(fmt, v, v["display_name"], new_tracks, known_ids - current_ids)
 
 
@@ -113,7 +128,9 @@ def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str
 
     for pl in playlists_state.values():
         for v in pl.get("variants", {}).values():
-            consider((v.get("tracks", {}).get(track.spotify_id) or {}).get("file_path"))
+            record = v.get("tracks", {}).get(track.spotify_id) or {}
+            if not record.get("stand_in"):                 # a stand-in is a different mix: not this track's source
+                consider(record.get("file_path"))
 
     for path_str in siblings.get(title_key(track.title), []):
         consider(path_str)
@@ -266,6 +283,8 @@ def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: st
     for f in audio_formats.FORMATS.values():
         twin = rb.find_playlist_id(f"{base_name} {f.label}")
         for title, path in (rb.get_playlist_track_paths(twin) if twin else {}).items():
+            if title != title_key(title):
+                continue                  # a labelled entry is a stand-in: not the track itself
             siblings.setdefault(title_key(title), []).append(path)
 
     needed: dict[str, list[str]] = {}      # spotify_id -> formats still missing for it

@@ -172,7 +172,7 @@ class LabelTest(ReviewTest):
              mock.patch("services.tagging.set_title", return_value=True) as tag_title:
             result = review.review_apply_labels()
             again = review.review_apply_labels()
-        self.assertEqual(result["applied"], [{"title": "Pleasure Love", "now": "Pleasure Love [CZR's Peak Hour Mix]"}])
+        self.assertEqual(result["applied"][0], {"title": "Pleasure Love", "now": "Pleasure Love [CZR's Peak Hour Mix]"})
         self.assertEqual(set_title.call_args.args[1], "Pleasure Love [CZR's Peak Hour Mix]")
         self.assertEqual(Path(tag_title.call_args.args[0]), self.new_a)
         self.assertEqual(again["applied"], [], "already applied")
@@ -210,6 +210,57 @@ class LabelTest(ReviewTest):
         self.assertEqual((result["applied"], result["failed"]), ([], ["Pleasure Love"]))
         tag_title.assert_not_called()
         self.assertNotIn("applied_label", self.entry())
+
+
+class StandInTest(LabelTest):
+    """A labelled different mix is a stand-in: sff keeps looking for the mix Spotify lists."""
+
+    def state_record(self):
+        state = json.loads(review.STATE_FILE.read_text(encoding="utf-8"))
+        return state["playlists"]["p"]["variants"]["aiff"]["tracks"]["t1"]
+
+    def apply(self):
+        with mock.patch.object(review, "_rekordbox_running", return_value=False), \
+             mock.patch.object(review, "get_orchestrator", None), \
+             mock.patch("services.rekordbox.set_title_by_path", return_value=True), \
+             mock.patch("services.tagging.set_title", return_value=True):
+            return review.review_apply_labels()
+
+    def test_applying_a_label_flags_the_track_as_a_stand_in_in_the_sync_state(self):
+        review.review_note(review.Note(id=self.pl(), label="CZR's Peak Hour Mix"))
+        result = self.apply()
+        self.assertTrue(self.state_record()["stand_in"])
+        self.assertEqual(self.state_record()["stand_in_label"], "CZR's Peak Hour Mix")
+        self.assertTrue(any("keeps looking" in a["now"] for a in result["applied"]))
+        self.assertEqual(self.apply()["applied"], [], "once only")
+
+    def test_a_mix_marked_final_is_not_a_stand_in(self):
+        review.review_note(review.Note(id=self.pl(), label="Radio Edit", final=True))
+        self.apply()
+        self.assertNotIn("stand_in", self.state_record())
+
+    def test_marking_it_final_later_stops_the_search(self):
+        review.review_note(review.Note(id=self.pl(), label="Radio Edit"))
+        self.apply()
+        review.review_note(review.Note(id=self.pl(), label="Radio Edit", final=True))
+        result = self.apply()
+        self.assertNotIn("stand_in", self.state_record())
+        self.assertTrue(any("stops looking" in a["now"] for a in result["applied"]))
+
+    def test_removing_the_label_clears_the_flag_too(self):
+        review.review_note(review.Note(id=self.pl(), label="Some Mix"))
+        self.apply()
+        review.review_note(review.Note(id=self.pl(), label=""))
+        self.apply()
+        self.assertNotIn("stand_in", self.state_record())
+
+    def test_a_label_that_was_applied_before_stand_ins_existed_is_picked_up(self):
+        review.review_note(review.Note(id=self.pl(), label="Old Mix"))
+        marks = review.load_marks()
+        marks[self.pl()]["applied_label"] = "Old Mix"              # applied by the earlier version of Apply
+        review.MARKS_FILE.write_text(json.dumps(marks), encoding="utf-8")
+        self.apply()
+        self.assertTrue(self.state_record()["stand_in"])
 
 
 class SuggestionTest(unittest.TestCase):
