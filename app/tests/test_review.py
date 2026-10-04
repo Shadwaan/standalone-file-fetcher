@@ -371,5 +371,67 @@ class MoveToPlaylistTest(ReviewTest):
         rb["update_content_path"].assert_not_called()
 
 
+class RejectWrongFilesTest(MoveToPlaylistTest):
+    """Apply also takes the files marked wrong out of their playlists, so the right ones get fetched."""
+
+    def setUp(self):
+        super().setUp()
+        from services import rejected
+        mock.patch.object(rejected, "FILE", self.tmp / "rejected_sources.json").start()
+        state = json.loads(review.STATE_FILE.read_text(encoding="utf-8"))
+        state["playlists"]["p"]["variants"]["aiff"]["tracks"]["t1"]["source"] = {"user": "badpeer", "remote_path": "share/Pleasure Love.flac"}
+        review.STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+
+    def apply_with(self, remove=True, update=True):
+        with mock.patch.object(review, "_rekordbox_running", return_value=False), \
+             mock.patch("services.tagging.set_title", return_value=True), \
+             mock.patch("services.rekordbox.remove_track_from_playlist", return_value=remove) as removed, \
+             mock.patch("services.rekordbox.update_content_path", return_value=update) as updated:
+            result = review.review_apply_labels()
+        return result, removed, updated
+
+    def test_a_wrong_file_leaves_its_playlist_and_is_set_aside_not_deleted(self):
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        result, removed, updated = self.apply_with()
+        removed.assert_called_once_with("beachbar sets (classic) AIFF", "a.aiff")
+        aside = self.home / "_rejected" / "a.aiff"
+        self.assertTrue(aside.is_file() and not self.moved.exists(), "kept, in _rejected")
+        updated.assert_called_once_with(self.moved.as_posix(), aside.as_posix())
+        self.assertIn("removed from beachbar sets (classic) AIFF", result["applied"][0]["now"])
+        self.assertEqual(self.entry()["rejected"], True)
+
+    def test_the_spotify_track_is_forgotten_so_the_next_sync_fetches_it(self):
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        self.apply_with()
+        state = json.loads(review.STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(state["playlists"]["p"]["variants"]["aiff"]["tracks"], {})
+
+    def test_its_source_is_remembered_so_it_is_never_picked_again(self):
+        from services import rejected
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        self.apply_with()
+        self.assertEqual(rejected.all_sources(), {("badpeer", "share/Pleasure Love.flac")})
+
+    def test_it_is_only_done_once(self):
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        self.apply_with()
+        result, removed, _ = self.apply_with()
+        self.assertEqual(result["applied"], [])
+        removed.assert_not_called()
+
+    def test_a_track_already_out_of_the_playlist_is_still_set_aside(self):
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        result, _, _ = self.apply_with(remove=False)
+        self.assertTrue((self.home / "_rejected" / "a.aiff").is_file())
+        self.assertEqual(result["failed"], [])
+
+    def test_a_label_on_a_wrong_file_is_ignored(self):
+        review.review_note(review.Note(id=self.pl(), label="Some Mix"))
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        with mock.patch("services.rekordbox.set_title_by_path", return_value=True) as set_title:
+            self.apply_with()
+        set_title.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

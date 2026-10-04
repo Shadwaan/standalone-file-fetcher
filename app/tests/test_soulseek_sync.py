@@ -197,6 +197,8 @@ class SyncFixture(unittest.TestCase):
         mock.patch.object(failure_log, "FILE", self.tmp / "failed_tracks.json").start()
         mock.patch.object(failure_log, "CSV_FILE", self.tmp / "failed_tracks.csv").start()
         mock.patch.object(source_log, "FILE", self.tmp / "download_sources.csv").start()
+        from services import rejected as _rejected
+        mock.patch.object(_rejected, "FILE", self.tmp / "rejected_sources.json").start()
         app_config.save({"music_folder": str(self.music), "download_source": "soulseek", "output_formats": ["flac", "aiff"]})
         mock.patch.dict("os.environ", {"NICOTINE_DOWNLOAD_DIR": str(self.nic)}).start()
 
@@ -562,6 +564,14 @@ class AlreadyFailedInNicotineTest(SyncFixture):
         """Nicotine+ resumes 'User logged off' transfers by itself when the user returns."""
         self.record("deadguy", "User logged off")
         self.assertEqual(self.pick()[0], "deadguy")
+
+    def test_a_source_whose_file_was_rejected_in_review_is_never_picked_again(self):
+        from services import rejected
+        self.assertEqual(self.pick()[0], "deadguy")
+        rejected.add("deadguy", "a/01 - Track Q.flac")
+        user, stats = self.pick()
+        self.assertEqual(user, "goodguy", "even though Nicotine+ has no record of it any more")
+        self.assertEqual(stats.blocked, 1)
 
     def test_the_reason_for_giving_up_mentions_it(self):
         self.nico.catalog.clear()

@@ -512,7 +512,8 @@ function wireNotes(it) {
 }
 
 function pendingLabels() {
-    return data.items.filter(i => i.keep_title ? !i.applied_keep : (i.mark !== 'wrong' && (i.label || '') !== (i.applied_label || ''))).length;
+    return data.items.filter(i => i.keep_title ? !i.applied_keep
+        : i.mark === 'wrong' ? !i.rejected : ((i.label || '') !== (i.applied_label || ''))).length;
 }
 
 function updatePending() {
@@ -529,9 +530,11 @@ function closeModal() { $('modalBg').classList.remove('show'); }
 function applyLabels() {
     const todo = data.items.filter(i => i.keep_title ? !i.applied_keep : (i.mark !== 'wrong' && (i.label || '') !== (i.applied_label || '')));
     const keeps = todo.filter(i => i.keep_title), labels = todo.filter(i => !i.keep_title);
+    const wrongs = data.items.filter(i => i.mark === 'wrong' && !i.keep_title && !i.rejected);
     const moves = keeps.filter(i => i.keep_move);
     showModal(`
         <h3>Apply to Rekordbox?</h3>
+        ${wrongs.length ? `<p><b>${wrongs.length}</b> file(s) marked wrong will be <b>taken out of their playlists</b> and put aside in a <code>_rejected</code> folder (never deleted); the next sync fetches the right ones.</p>` : ''}
         <p><b>${labels.length}</b> version label(s) will be added to titles, and <b>${keeps.length}</b> song(s) renamed${moves.length ? `, <b>${moves.length}</b> of them moved to another playlist (file and playlist)` : ''}.
            The new titles are also written into the files' tags.</p>
         ${moves.length ? `<ul>${moves.map(i => `<li>${esc(i.keep_title)} → <b>${esc(i.keep_move)}</b></li>`).join('')}</ul>` : ''}

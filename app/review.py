@@ -147,6 +147,7 @@ def load_items() -> list[dict]:
             "keep_artist": ((marks.get(iid) or {}).get("keep") or {}).get("artist", ""),
             "keep_title": ((marks.get(iid) or {}).get("keep") or {}).get("title", ""),
             "keep_move": ((marks.get(iid) or {}).get("keep") or {}).get("move_to", ""),
+            "rejected": bool((marks.get(iid) or {}).get("rejected")),
             "applied_keep": bool((marks.get(iid) or {}).get("keep")) and (marks.get(iid) or {}).get("applied_keep") == (marks.get(iid) or {}).get("keep"),
         })
     return items
@@ -370,6 +371,51 @@ def _current_playlist_of(path: Path) -> str:
     return ""
 
 
+def _reject_file(path: Path, item: dict) -> str | None:
+    """A file marked wrong: take it out of its Rekordbox playlist, put the file aside (never deleted) in
+    the playlist folder's _rejected, point Rekordbox at the moved file so nothing reads as missing, forget
+    its link to the Spotify track (so the next sync fetches the right one) and remember where it came from
+    so that source is not picked again. Returns the playlist it was removed from, or None on failure."""
+    from services import rejected
+    from services import rekordbox as rb
+    import shutil
+
+    playlist = _current_playlist_of(path)
+    if not playlist:
+        return None
+    source = _source_of(path)
+    rb.remove_track_from_playlist(playlist, path.name)            # False when it was already out: that is fine
+    aside = path.parent / "_rejected"
+    aside.mkdir(exist_ok=True)
+    from services.audio_formats import unique_path
+    dest = unique_path(aside, path.stem, path.suffix.lstrip("."))
+    shutil.move(str(path), str(dest))
+    if not rb.update_content_path(path.as_posix(), dest.as_posix()):
+        logger.warning("Rekordbox did not accept the moved path for %s; its entry may show as missing", path.name)
+    _detach_from_spotify_track(path)
+    if source:
+        rejected.add(source.get("user", ""), source.get("remote_path", ""))
+    return playlist
+
+
+def _source_of(path: Path) -> dict:
+    """Where a file came from, if sff recorded it (downloads since the source log existed)."""
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    orchestrator = get_orchestrator() if get_orchestrator else None
+    if orchestrator is not None:
+        state = orchestrator._state
+    target = path.as_posix().lower()
+    for pl in state.get("playlists", {}).values():
+        for variant in (pl.get("variants") or {}).values():
+            for rec in (variant.get("tracks") or {}).values():
+                if str(rec.get("file_path", "")).replace("\\", "/").lower() == target:
+                    return rec.get("source") or {}
+    return {}
+
+
 def _music_folder() -> Path:
     from services import app_config
     return Path(app_config.get_music_folder())
@@ -472,8 +518,19 @@ def review_apply_labels():
                 else:
                     failed.append(item["title"])
                 continue
+            if entry.get("mark") == "wrong":                # a wrong file: out of its playlist, aside, and re-fetched
+                if entry.get("rejected"):
+                    continue
+                outcome = _reject_file(path, item)
+                if outcome:
+                    entry["rejected"] = True
+                    marks[item["id"]] = entry
+                    applied.append({"title": item["title"], "now": f"removed from {outcome}; the file is kept in _rejected"})
+                else:
+                    failed.append(item["title"] + " (could not be removed)")
+                continue
             label, done = entry.get("label", ""), entry.get("applied_label", "")
-            if entry.get("mark") == "wrong" or label == done:
+            if label == done:
                 continue
             title = with_label(item["title"], label)
             if rb.set_title_by_path(path.as_posix(), title):

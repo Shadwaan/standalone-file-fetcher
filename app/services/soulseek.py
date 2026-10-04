@@ -570,11 +570,13 @@ UNRETRIABLE_STATUSES = {
 
 
 def _unretriable_keys() -> set[tuple]:
+    from services import rejected                 # sources whose file was found to be wrong
     try:
-        return {(d.get("username"), d.get("virtual_path") or d.get("file_path"))
-                for d in get_downloads(active_only=False) if d.get("status") in UNRETRIABLE_STATUSES}
+        known = {(d.get("username"), d.get("virtual_path") or d.get("file_path"))
+                 for d in get_downloads(active_only=False) if d.get("status") in UNRETRIABLE_STATUSES}
     except Exception:
-        return set()
+        known = set()
+    return known | rejected.all_sources()
 
 
 class SearchJob(NamedTuple):

@@ -25,3 +25,4 @@ download_sources_by_playlist.csv
 review_marks.json
 suspect_downloads_audit.csv
 .review_cache/
+rejected_sources.json
