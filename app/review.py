@@ -4,7 +4,9 @@ The audit of finished downloads (suspect_downloads_audit.csv) flags files that m
 a vocals-only stem, or a different version. A similarity score can't settle the grey area, so this
 shows each flagged file next to the real track (YouTube video, Spotify, or the older MP3). The
 reference is always taken as right; the only question is whether the NEW file is. Marks are kept in
-review_marks.json; nothing here changes your library.
+review_marks.json. A track can also carry a version label ("CZR's Peak Hour Mix") for a file that is a
+different mix but kept on purpose; "Apply labels" writes it into the title in Rekordbox and in the file.
+Nothing else here changes your library.
 """
 import csv
 import hashlib
@@ -18,6 +20,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
+
+from services.labels import with_label
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +103,9 @@ def load_items() -> list[dict]:
             "new_name": Path(new_file).name, "old_name": Path(ref).name if ref else "",
             "has_new": Path(new_file).is_file(), "has_old": bool(ref) and Path(ref).is_file(),
             "mark": (marks.get(iid) or {}).get("mark"),
+            "label": (marks.get(iid) or {}).get("label", ""),
+            "note": (marks.get(iid) or {}).get("note", ""),
+            "applied_label": (marks.get(iid) or {}).get("applied_label", ""),
         })
     return items
 
@@ -170,6 +177,16 @@ class Mark(BaseModel):
     mark: str | None = None       # one of MARKS, or null to clear
 
 
+class Note(BaseModel):
+    id: str
+    label: str = ""               # version label that goes into the Rekordbox title
+    note: str = ""                # private note, kept here only
+
+
+def _save_marks(marks: dict) -> None:
+    MARKS_FILE.write_text(json.dumps(marks, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
 @router.get("/review")
 def review_page():
     return FileResponse(str(PAGE), headers={"Cache-Control": "no-cache"})
@@ -235,9 +252,69 @@ def review_mark(body: Mark):
         raise HTTPException(status_code=400, detail="Bad id")
     with _lock:
         marks = load_marks()
+        entry = marks.get(body.id, {})
         if body.mark is None:
-            marks.pop(body.id, None)
+            entry.pop("mark", None)
         else:
-            marks[body.id] = {"mark": body.mark}
-        MARKS_FILE.write_text(json.dumps(marks, indent=1), encoding="utf-8")
+            entry["mark"] = body.mark
+        if entry:
+            marks[body.id] = entry
+        else:
+            marks.pop(body.id, None)
+        _save_marks(marks)
     return JSONResponse({"ok": True})
+
+
+@router.post("/api/review/note")
+def review_note(body: Note):
+    """Save a track's version label and private note (typed before or after marking it)."""
+    if not re.fullmatch(r"[0-9a-f]{12}", body.id):
+        raise HTTPException(status_code=400, detail="Bad id")
+    with _lock:
+        marks = load_marks()
+        entry = marks.get(body.id, {})
+        for key, value in (("label", " ".join(body.label.split())), ("note", body.note.strip())):
+            if value:
+                entry[key] = value
+            else:
+                entry.pop(key, None)
+        if entry:
+            marks[body.id] = entry
+        else:
+            marks.pop(body.id, None)
+        _save_marks(marks)
+    return JSONResponse({"ok": True})
+
+
+def _rekordbox_running() -> bool:
+    from services.platform_paths import is_rekordbox_running
+    return is_rekordbox_running()
+
+
+@router.post("/api/review/apply-labels")
+def review_apply_labels():
+    """Write each track's version label into its Rekordbox title and its file's title tag. A label that
+    was applied and later removed puts the plain title back. Tracks marked wrong are left alone."""
+    if _rekordbox_running():
+        raise HTTPException(status_code=409, detail="Close Rekordbox first: its library can't be edited while it is open.")
+    from services import rekordbox as rb
+    from services import tagging
+    applied, failed = [], []
+    with _lock:
+        marks = load_marks()
+        for item in load_items():
+            entry = marks.get(item["id"]) or {}
+            label, done = entry.get("label", ""), entry.get("applied_label", "")
+            if entry.get("mark") == "wrong" or label == done:
+                continue
+            path = _paths(item["id"])[0]
+            title = with_label(item["title"], label)
+            if rb.set_title_by_path(str(path).replace("\\", "/"), title):
+                tagging.set_title(path, title)
+                entry["applied_label"] = label
+                marks[item["id"]] = entry
+                applied.append({"title": item["title"], "now": title})
+            else:
+                failed.append(item["title"])
+        _save_marks(marks)
+    return {"applied": applied, "failed": failed}

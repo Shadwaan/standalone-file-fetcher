@@ -1081,6 +1081,40 @@ class DownloadChecksTest(SyncFixture):
         self.assertEqual(len(self.aiffs()), 1)
 
 
+class VersionLabelTest(SyncFixture):
+    """A title we labelled "[...]" in Rekordbox is still the same track."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-x", "I Feel For You", "Bob Sinclar", 0)]
+
+    def test_label_helpers(self):
+        from services.labels import strip_label, title_key, with_label
+        self.assertEqual(strip_label("I Feel For You [CZR's Peak Hour Mix]"), "I Feel For You")
+        self.assertEqual(with_label("I Feel For You [Old]", "CZR's Peak Hour Mix"), "I Feel For You [CZR's Peak Hour Mix]")
+        self.assertEqual(with_label("I Feel For You", ""), "I Feel For You")
+        self.assertEqual(with_label("Foo", "A [b]"), "Foo [A (b)]", "brackets inside a label can't break the format")
+        self.assertEqual(title_key("Foo (Dub) [x]"), "Foo (Dub)")
+
+    def test_a_labelled_track_already_in_the_playlist_is_not_fetched_again(self):
+        f = self.tmp / "Library" / "x.flac"
+        make_audio(f, "song_a")
+        self.rbfake.add_existing_playlist("Deep tech AIFF", {"I Feel For You [CZR's Peak Hour Mix]": str(f).replace("\\", "/")})
+        result = self.run_sync()
+        self.assertEqual(self.nico.searches, [], "no search: it is already there under its labelled title")
+        self.assertEqual(self.rbfake.imports, [])
+        self.assertEqual(result["tracks_failed"], 0)
+
+    def test_the_same_playlist_in_another_format_also_counts_when_labelled(self):
+        flac = self.tmp / "Library" / "x.flac"
+        make_audio(flac, "song_a")
+        self.rbfake.add_existing_playlist("Deep tech FLAC", {"I Feel For You [CZR's Peak Hour Mix]": str(flac).replace("\\", "/")})
+        self.run_sync()
+        self.assertEqual(self.nico.searches, [], "derived from the FLAC twin, found despite the label")
+        self.assertEqual(len(list(self.music.rglob("*.aiff"))), 1)
+
+
 class FlacWithoutAttributesTest(unittest.TestCase):
     """A real '16BIT-WEB-FLAC' release came back with no bit depth and was rejected."""
 

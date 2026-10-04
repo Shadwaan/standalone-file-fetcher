@@ -73,6 +73,16 @@
     .dot.right { background: #1db954; } .dot.wrong { background: #ff5a73; }
     .row .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .row .s { color: #777; font-variant-numeric: tabular-nums; }
+    .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 6px 0 14px; }
+    @media (max-width: 800px) { .notes { grid-template-columns: 1fr; } }
+    .notes label { font-size: 12px; color: #999; display: block; }
+    .notes label span { color: #666; }
+    .notes input { width: 100%; margin-top: 4px; background: #0e0e15; color: #e8e8e8; border: 1px solid #2a2a38; border-radius: 8px;
+                   padding: 9px 10px; font: inherit; }
+    .notes input:focus { outline: none; border-color: #1db954; }
+    .preview { grid-column: 1 / -1; font-size: 13px; color: #8a8a99; min-height: 1.3em; }
+    .preview b { color: #ffd166; font-weight: 600; }
+    .row .tag { font-size: 11px; color: #ffd166; margin-left: 6px; }
     .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #1f1f2c; border: 1px solid #3a3a4e;
              border-radius: 10px; padding: 10px 14px; display: none; gap: 14px; align-items: center; box-shadow: 0 8px 30px #000a;
              font-size: 14px; z-index: 10; max-width: 92vw; }
@@ -90,6 +100,7 @@
             <div class="track"><div class="fill" id="fill"></div></div>
             <div class="label" id="progressLabel"></div>
         </div>
+        <button class="btn" id="applyBtn" title="Write version labels into the Rekordbox titles (Rekordbox must be closed)">Apply labels to Rekordbox</button>
         <select id="filter" aria-label="Which tracks to show">
             <option value="unmarked">Unmarked only</option>
             <option value="all">All flagged</option>
@@ -158,6 +169,7 @@ function render() {
     $('fill').style.width = total ? (100 * done / total) + '%' : '0';
     $('progressLabel').textContent = `${done} of ${total} marked`;
     renderList();
+    updatePending();
     const stage = $('stage');
     if (!view.length) {
         stage.innerHTML = `<div class="card empty">${data.total ? 'Nothing left in this view. 🎉' : 'No flagged tracks found. Run the audit first.'}</div>`;
@@ -199,6 +211,13 @@ function render() {
             ${[30, 60, 120].map(s => `<button class="btn" data-jump="${s}">${fmt(s)}</button>`).join('')}
             <button class="btn" data-jump="-10" title="Back 10 seconds">−10s <kbd>[</kbd></button>
             <button class="btn" data-jump="+10" title="Forward 10 seconds">+10s <kbd>]</kbd></button>
+        </div>
+        <div class="notes">
+            <label>Version label <span>(optional — if this file is a different mix you are keeping, name it; it is added to the title in Rekordbox)</span>
+                <input id="labelInput" maxlength="80" placeholder="e.g. CZR's Peak Hour Mix" value="${esc(it.label)}"></label>
+            <label>Private note <span>(only kept here)</span>
+                <input id="noteInput" maxlength="300" placeholder="anything you want to remember" value="${esc(it.note)}"></label>
+            <div class="preview" id="labelPreview"></div>
         </div>
         <div class="marks">
             ${MARKS.map(([key, text, k]) => `<button class="btn mark ${key} ${it.mark === key ? 'on' : ''}" data-mark="${key}">${text}<kbd>${k}</kbd></button>`).join('')}
@@ -367,9 +386,58 @@ function wire(it) {
         setActive('new');
         showRef(it);
     });
+    wireNotes(it);
     $('prevBtn').onclick = () => go(-1);
     $('nextBtn').onclick = () => go(1);
     if ($('clearBtn')) $('clearBtn').onclick = () => mark(it, null);
+}
+
+let noteTimer = null;
+
+function labeledTitle(it) {
+    const label = $('labelInput').value.replace(/[\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+    return label ? `${it.title} [${label}]` : it.title;
+}
+
+function wireNotes(it) {
+    const preview = () => {
+        const label = $('labelInput').value.trim();
+        $('labelPreview').innerHTML = label
+            ? `Rekordbox will show: <b>${esc(labeledTitle(it))}</b>` + (it.applied_label === label ? ' (already applied)' : ' — press “Apply labels to Rekordbox” when you are done')
+            : (it.applied_label ? 'Label removed — the plain title is put back when you apply.' : '');
+    };
+    const save = async () => {
+        it.label = $('labelInput').value.trim();
+        it.note = $('noteInput').value.trim();
+        await fetch('/api/review/note', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({ id: it.id, label: it.label, note: it.note }) });
+        updatePending();
+    };
+    for (const id of ['labelInput', 'noteInput']) {
+        $(id).addEventListener('input', () => { preview(); clearTimeout(noteTimer); noteTimer = setTimeout(save, 600); });
+        $(id).addEventListener('blur', () => { clearTimeout(noteTimer); save(); });
+    }
+    preview();
+}
+
+function pendingLabels() {
+    return data.items.filter(i => i.mark !== 'wrong' && (i.label || '') !== (i.applied_label || '')).length;
+}
+
+function updatePending() {
+    const n = pendingLabels();
+    $('applyBtn').textContent = n ? `Apply labels to Rekordbox (${n})` : 'Apply labels to Rekordbox';
+    $('applyBtn').disabled = n === 0;
+}
+
+async function applyLabels() {
+    if (!confirm('Write the version labels into the titles in Rekordbox (and the files)? Rekordbox must be closed.')) return;
+    $('applyBtn').disabled = true;
+    const r = await fetch('/api/review/apply-labels', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) { toast(d.detail || 'Could not apply the labels.'); updatePending(); return; }
+    toast(`Labels applied to ${d.applied.length} track(s)` + (d.failed.length ? ` — ${d.failed.length} not found in Rekordbox: ${d.failed.join(', ')}` : '.'));
+    await load(view[pos]?.id);
 }
 
 function go(d) {
@@ -420,13 +488,13 @@ async function undo() {
 function renderList() {
     $('list').innerHTML = view.map((it, i) => `<div class="row ${i === pos ? 'cur' : ''}" data-i="${i}">
         <span class="dot ${it.mark || ''}"></span>
-        <span class="t">${esc(it.title)} <span style="color:#666">— ${esc(it.artist)}</span></span>
+        <span class="t">${esc(it.title)} <span style="color:#666">— ${esc(it.artist)}</span>${it.label ? `<span class="tag">[${esc(it.label)}]</span>` : ''}</span>
         <span class="s">${it.similarity == null ? '' : it.similarity.toFixed(2)}</span></div>`).join('');
     document.querySelectorAll('.row').forEach(r => r.onclick = () => { stopAll(); pos = Number(r.dataset.i); render(); });
 }
 
 document.addEventListener('keydown', e => {
-    if (e.target.tagName === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (['SELECT', 'INPUT', 'TEXTAREA'].includes(e.target.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
     const it = view[pos];
     if (!it) return;
     if (e.key === ' ') { e.preventDefault(); togglePlay(); }
@@ -441,6 +509,7 @@ document.addEventListener('keydown', e => {
 
 $('filter').onchange = () => { stopAll(); pos = 0; applyFilter(); };
 $('undoBtn').onclick = undo;
+$('applyBtn').onclick = applyLabels;
 load();
 </script>
 </body>

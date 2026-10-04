@@ -968,12 +968,14 @@ def reorder_playlist_by_titles(playlist_id: str, ordered_titles: list[str]) -> i
         for s in songs:
             c = db.session.query(tables.DjmdContent).filter_by(ID=s.ContentID).first()
             if c:
-                song_by_title[c.Title] = s
+                from services.labels import title_key
+                song_by_title[title_key(c.Title)] = s
 
         reordered = 0
         pos = 1
         for title in ordered_titles:
-            song = song_by_title.get(title)
+            from services.labels import title_key
+            song = song_by_title.get(title_key(title))
             if not song:
                 continue
             if song.TrackNo != pos:
@@ -988,6 +990,29 @@ def reorder_playlist_by_titles(playlist_id: str, ordered_titles: list[str]) -> i
     except Exception as e:
         logger.error("Failed to reorder playlist '%s': %s", playlist_id, e)
         return 0
+
+
+def set_title_by_path(file_path: str, new_title: str) -> bool:
+    """Change the title Rekordbox shows for the track stored at `file_path`. Rekordbox must be closed."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        content = db.session.query(tables.DjmdContent).filter_by(FolderPath=file_path.replace("\\", "/")).first()
+        if not content:
+            db.session.close()
+            db.engine.dispose()
+            return False
+        content.Title = new_title
+        content.updated_at = datetime.now(timezone.utc)
+        db.session.commit()
+        db.session.close()
+        db.engine.dispose()
+        return True
+    except Exception as e:
+        logger.error("Failed to set the title for '%s': %s", file_path, e)
+        return False
 
 
 def flush_wal():

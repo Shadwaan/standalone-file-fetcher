@@ -171,6 +171,36 @@ def _write_mp3(path: Path, track, artwork: bytes | None, carry: dict) -> None:
     _write_id3_audio(path, track, artwork, carry, MP3)
 
 
+def set_title(path: Path, title: str) -> bool:
+    """Change only the title tag of a file (FLAC, AIFF, WAV or MP3). False if it could not be done."""
+    try:
+        ext = path.suffix.lower()
+        if ext == ".flac":
+            from mutagen.flac import FLAC
+            f = FLAC(str(path))
+            f["title"] = [title]
+            f.save()
+        elif ext in (".aiff", ".aif", ".wav", ".mp3"):
+            from mutagen import id3
+            if ext == ".mp3":
+                from mutagen.mp3 import MP3 as opener
+            elif ext == ".wav":
+                from mutagen.wave import WAVE as opener
+            else:
+                from mutagen.aiff import AIFF as opener
+            f = opener(str(path))
+            if f.tags is None:
+                f.add_tags()
+            f.tags.setall("TIT2", [id3.TIT2(encoding=1, text=title)])
+            f.save(v2_version=3)
+        else:
+            return False
+        return True
+    except Exception as e:
+        logger.warning("Could not retitle %s: %s", path.name, e)
+        return False
+
+
 def write_tags(path: Path, track, artwork: bytes | None = None, carry: dict | None = None) -> bool:
     """Write the clean tag set + cover into a FLAC, AIFF, WAV or MP3. Returns False (and
     logs) instead of raising: bad tags shouldn't fail a download."""

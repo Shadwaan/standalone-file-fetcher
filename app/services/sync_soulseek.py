@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from services import app_config, audio_formats, failure_log, soulseek, source_log, tagging, verify_audio
+from services.labels import title_key
 from services import rekordbox as rb
 
 logger = logging.getLogger(__name__)
@@ -69,20 +70,21 @@ def _inspect_variant(pl_state: dict, fmt: str, base_name: str, tracks: list, cur
     v["rb_playlist_id"] = pid
     v["display_name"] = name or wanted
 
-    in_rekordbox = rb.get_playlist_track_paths(pid) if pid else {}
+    # keyed ignoring a trailing "[version label]": a title we labelled is still the same track
+    in_rekordbox = {title_key(t): p for t, p in (rb.get_playlist_track_paths(pid) if pid else {}).items()}
     known_ids = set(v["tracks"])
 
     # Rekordbox has it but our state never heard of it (e.g. a playlist built by
     # hand) -> record it instead of silently re-downloading everything.
     for t in tracks:
-        if t.spotify_id not in known_ids and t.title in in_rekordbox:
-            path = in_rekordbox[t.title]
+        if t.spotify_id not in known_ids and title_key(t.title) in in_rekordbox:
+            path = in_rekordbox[title_key(t.title)]
             v["tracks"][t.spotify_id] = {
                 "filename": Path(path).name if path else "", "file_path": path,
                 "artist": t.artist, "title": t.title,
             }
 
-    new_tracks = [t for t in tracks if t.spotify_id not in v["tracks"] and t.title not in in_rekordbox]
+    new_tracks = [t for t in tracks if t.spotify_id not in v["tracks"] and title_key(t.title) not in in_rekordbox]
     return _Variant(fmt, v, v["display_name"], new_tracks, known_ids - current_ids)
 
 
@@ -113,7 +115,7 @@ def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str
         for v in pl.get("variants", {}).values():
             consider((v.get("tracks", {}).get(track.spotify_id) or {}).get("file_path"))
 
-    for path_str in siblings.get(track.title, []):
+    for path_str in siblings.get(title_key(track.title), []):
         consider(path_str)
 
     title = track.title.strip().lower()
@@ -264,7 +266,7 @@ def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: st
     for f in audio_formats.FORMATS.values():
         twin = rb.find_playlist_id(f"{base_name} {f.label}")
         for title, path in (rb.get_playlist_track_paths(twin) if twin else {}).items():
-            siblings.setdefault(title, []).append(path)
+            siblings.setdefault(title_key(title), []).append(path)
 
     needed: dict[str, list[str]] = {}      # spotify_id -> formats still missing for it
     for fmt in formats:

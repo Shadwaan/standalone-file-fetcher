@@ -141,5 +141,76 @@ class ReviewTest(unittest.TestCase):
         self.assertNotIn("youtube_right", review.MARKS_FILE.read_text(encoding="utf-8"))
 
 
+class LabelTest(ReviewTest):
+    """A different mix that is kept on purpose gets a version label in its Rekordbox title."""
+
+    def pl(self):
+        return self.items["Pleasure Love"]["id"]
+
+    def entry(self):
+        return json.loads(review.MARKS_FILE.read_text(encoding="utf-8"))[self.pl()]
+
+    def test_a_label_and_note_are_saved_and_survive_marking_and_unmarking(self):
+        review.review_note(review.Note(id=self.pl(), label="  CZR's   Peak Hour Mix ", note="  sounds great "))
+        review.review_mark(review.Mark(id=self.pl(), mark="right"))
+        self.assertEqual(self.entry(), {"label": "CZR's Peak Hour Mix", "note": "sounds great", "mark": "right"})
+        review.review_mark(review.Mark(id=self.pl(), mark=None))
+        self.assertEqual(self.entry(), {"label": "CZR's Peak Hour Mix", "note": "sounds great"})
+        item = {i["title"]: i for i in review.load_items()}["Pleasure Love"]
+        self.assertEqual((item["label"], item["note"], item["mark"]), ("CZR's Peak Hour Mix", "sounds great", None))
+        self.assertEqual(review.review_items()["marked"], 0, "a label alone is not a mark")
+
+    def test_clearing_the_boxes_removes_the_entry(self):
+        review.review_note(review.Note(id=self.pl(), label="x", note="y"))
+        review.review_note(review.Note(id=self.pl(), label="", note=""))
+        self.assertEqual(review.load_marks(), {})
+
+    def test_apply_writes_the_title_to_rekordbox_and_the_file_then_does_nothing_more(self):
+        review.review_note(review.Note(id=self.pl(), label="CZR's Peak Hour Mix"))
+        with mock.patch.object(review, "_rekordbox_running", return_value=False), \
+             mock.patch("services.rekordbox.set_title_by_path", return_value=True) as set_title, \
+             mock.patch("services.tagging.set_title", return_value=True) as tag_title:
+            result = review.review_apply_labels()
+            again = review.review_apply_labels()
+        self.assertEqual(result["applied"], [{"title": "Pleasure Love", "now": "Pleasure Love [CZR's Peak Hour Mix]"}])
+        self.assertEqual(set_title.call_args.args[1], "Pleasure Love [CZR's Peak Hour Mix]")
+        self.assertEqual(Path(tag_title.call_args.args[0]), self.new_a)
+        self.assertEqual(again["applied"], [], "already applied")
+        self.assertEqual(self.entry()["applied_label"], "CZR's Peak Hour Mix")
+
+    def test_removing_a_label_puts_the_plain_title_back(self):
+        review.review_note(review.Note(id=self.pl(), label="Some Mix"))
+        with mock.patch.object(review, "_rekordbox_running", return_value=False), \
+             mock.patch("services.rekordbox.set_title_by_path", return_value=True) as set_title, \
+             mock.patch("services.tagging.set_title", return_value=True):
+            review.review_apply_labels()
+            review.review_note(review.Note(id=self.pl(), label=""))
+            result = review.review_apply_labels()
+        self.assertEqual(result["applied"][0]["now"], "Pleasure Love")
+        self.assertEqual(set_title.call_args.args[1], "Pleasure Love")
+
+    def test_it_refuses_while_rekordbox_is_open_and_skips_tracks_marked_wrong(self):
+        review.review_note(review.Note(id=self.pl(), label="Some Mix"))
+        with mock.patch.object(review, "_rekordbox_running", return_value=True):
+            with self.assertRaises(HTTPException) as ctx:
+                review.review_apply_labels()
+        self.assertEqual(ctx.exception.status_code, 409)
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        with mock.patch.object(review, "_rekordbox_running", return_value=False), \
+             mock.patch("services.rekordbox.set_title_by_path", return_value=True) as set_title:
+            self.assertEqual(review.review_apply_labels()["applied"], [])
+        set_title.assert_not_called()
+
+    def test_a_track_rekordbox_does_not_have_is_reported_not_marked_applied(self):
+        review.review_note(review.Note(id=self.pl(), label="Some Mix"))
+        with mock.patch.object(review, "_rekordbox_running", return_value=False), \
+             mock.patch("services.rekordbox.set_title_by_path", return_value=False), \
+             mock.patch("services.tagging.set_title") as tag_title:
+            result = review.review_apply_labels()
+        self.assertEqual((result["applied"], result["failed"]), ([], ["Pleasure Love"]))
+        tag_title.assert_not_called()
+        self.assertNotIn("applied_label", self.entry())
+
+
 if __name__ == "__main__":
     unittest.main()
