@@ -25,7 +25,8 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from services import app_config, audio_formats, failure_log, soulseek, source_log, tagging, verify_audio
+from services import app_config, audio_formats, audit_log, failure_log, soulseek, source_log, tagging, verify_audio
+from services.suggest import suggest_label
 from services.labels import title_key
 from services import rekordbox as rb
 
@@ -170,7 +171,7 @@ def _references(needed, track_by_id, library) -> dict[str, Path]:
     return out
 
 
-def _make_validator(references: dict[str, Path]):
+def _make_validator(references: dict[str, Path], findings: dict | None = None):
     """The "is this finished download any good?" gate resolve_all applies to every file that arrives.
     Returns True, or a short reason it was turned down (and another source is tried)."""
     def validate(path: Path, track):
@@ -194,6 +195,8 @@ def _make_validator(references: dict[str, Path]):
                 if similarity < verify_audio.SAME_SONG_REJECT_BELOW:
                     logger.info("rejected %s: it does not match the copy you already have (%.2f)", path.name, similarity)
                     return f"a different song from the copy you already have (match {similarity:.2f})"
+                if findings is not None:
+                    findings[track.spotify_id] = {"similarity": similarity, "reference": str(reference)}
                 if similarity < verify_audio.SAME_SONG_WARN_BELOW:
                     logger.warning("%s only partly matches the copy you already have (%.2f): a different version?",
                                    path.name, similarity)
@@ -317,6 +320,9 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
     if not needed:
         return []
 
+    findings: dict[str, dict] = {}          # what the checks noticed about each new download
+    references: dict[str, Path] = {}
+
     # 2. SOURCE -- reuse what we already have before going to Soulseek
     existing = {sid: _existing_sources(orch._state["playlists"], track_by_id[sid], library, siblings) for sid in needed}
     derived = {sid: found[0] for sid, found in existing.items() if found}
@@ -341,8 +347,9 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
                 f"Action needed from you: {req['user']} wants proof you are a person before it will send files -- "
                 f"open Nicotine+ > Private Chat > {req['user']} and {ask} yourself. sff will not answer these for you.")
 
+        references = _references(needed, track_by_id, library)
         soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir,
-                             validate=_make_validator(_references(needed, track_by_id, library)),
+                             validate=_make_validator(references, findings),
                              on_notice=_notice)
 
     # 3. FILE WORK
@@ -437,6 +444,27 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
             if not tagging.write_tags(path, track, art, carry):
                 progress.errors.append(f"Could not write tags/cover for {label} ({fmt}); file kept as is")
             planned.append((sid, fmt, path))
+    # Anything the checks could not settle by themselves is queued for the review page.
+    queued = []
+    for sid, fmt, path in planned:
+        if sid not in findings and sources.get(sid, {}).get("how") != "downloaded":
+            continue                                           # made from a file we already had: nothing new to judge
+        track = track_by_id[sid]
+        reasons, sim = [], (findings.get(sid) or {}).get("similarity")
+        if sim is not None and sim < verify_audio.SAME_SONG_WARN_BELOW:
+            reasons.append("different version?")
+        version = suggest_label(path.stem, track.title)
+        if version:
+            reasons.append(f"different mix? (the file name says: {version})")
+        if reasons:
+            queued.append({"playlist": variants[fmt].display_name, "title": track.title, "verdict": " + ".join(reasons),
+                           "similarity_to_reference": "" if sim is None else round(sim, 2), "bass_share": "",
+                           "new_file": str(path), "reference": (findings.get(sid) or {}).get("reference", "")})
+    if queued:
+        added = audit_log.append(queued)
+        if added:
+            logger.info("%d download(s) queued for your review", added)
+
     # persistent records, so what Soulseek couldn't supply, and who supplied the rest, survive turning sff off
     failure_log.record(failures, resolved_ids={sid for sid, _, _ in planned})
     source_log.record([

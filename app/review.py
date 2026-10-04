@@ -26,7 +26,9 @@ from services.labels import with_label
 logger = logging.getLogger(__name__)
 
 APP_DIR = Path(__file__).resolve().parent
-AUDIT_FILE = APP_DIR / "suspect_downloads_audit.csv"
+from services import audit_log  # noqa: E402
+
+AUDIT_FILE = audit_log.FILE
 MARKS_FILE = APP_DIR / "review_marks.json"
 CACHE_DIR = APP_DIR / ".review_cache"
 STATE_FILE = APP_DIR / "sync_state.json"
@@ -61,39 +63,7 @@ def _tracks_by_file() -> dict[str, dict]:
     return out
 
 
-# ---- suggestions, taken from the downloaded file's own name ---------------------------------------
-_TRACK_NUMBER = re.compile(r"^\s*(?:[\(\[]?[a-zA-Z]?\d{1,4}[\)\]]?[\.\-_\s]+){1,2}")
-_VERSION_WORD = re.compile(r"\b(mix|remix|edit|version|dub|rework|vip|instrumental|extended|radio|bootleg|club|remaster(?:ed)?"
-                           r"|live|acoustic)\b", re.IGNORECASE)
-_PLAIN_TAGS = {"original mix", "original version", "album version", "album mix"}
-
-
-def _clean_stem(stem: str) -> str:
-    """A file name without its track number, underscores or extension."""
-    text = _TRACK_NUMBER.sub("", stem.replace("_", " "))
-    return re.sub(r"\s+", " ", text).strip(" -")
-
-
-def suggest_label(stem: str, spotify_title: str) -> str:
-    """The version tag in the file's name that the Spotify title doesn't have, e.g.
-    'Bob Sinclar - I Feel For You (CZR's Peak Hour Mix)' -> "CZR's Peak Hour Mix". Empty if there is none."""
-    text, title = _clean_stem(stem), spotify_title.lower()
-    for group in reversed(re.findall(r"[\(\[]([^\)\]]+)[\)\]]", text)):
-        low = group.strip().lower()
-        if _VERSION_WORD.search(group) and low not in _PLAIN_TAGS and low not in title:
-            return group.strip()
-    match = re.search(r"\s-\s([^-]*\b(?:mix|remix|edit|version|dub)\b[^-]*)$", text, re.IGNORECASE)
-    if match and match.group(1).strip().lower() not in title:
-        return match.group(1).strip()
-    return ""
-
-
-def suggest_other(stem: str) -> tuple[str, str]:
-    """(artist, title) guessed from a file name: the number is dropped and 'Artist - Title' split.
-    The artist is empty when the name has only a title."""
-    text = _clean_stem(stem)
-    parts = re.split(r"\s+-\s+", text, maxsplit=1)
-    return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else ("", text)
+from services.suggest import suggest_label, suggest_other  # noqa: E402,F401  (shared with the sync)
 
 
 def _group(row: dict) -> str:
@@ -105,7 +75,7 @@ def _group(row: dict) -> str:
     if "VOCALS" in verdict:
         return "stem"
     if sim is None:
-        return "other"
+        return "version" if "mix?" in verdict else "other"
     if sim < 0.3:
         return "wrong_clear"
     if sim < 0.7:
@@ -158,6 +128,11 @@ def load_items() -> list[dict]:
 # The first version of this page had four choices. The reference is always right, so they collapse to
 # whether the NEW file is right or wrong; marks made under the old wording are converted, not lost.
 _LEGACY_MARKS = {"new_right": "right", "both_ok": "right", "youtube_right": "wrong", "neither": "wrong"}
+
+
+def pending_count() -> int:
+    """Queued tracks you have not marked yet."""
+    return sum(1 for item in load_items() if not item["mark"] and not item["keep_title"])
 
 
 def load_marks() -> dict:

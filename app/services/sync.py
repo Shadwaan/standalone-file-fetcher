@@ -104,6 +104,7 @@ class SyncOrchestrator:
             "tracks_failed": self.progress.tracks_failed,
             "tracks_removed": self.progress.tracks_removed,
             "tracks_deferred": self.progress.tracks_deferred,
+            "needs_review": self._needs_review(),
             "errors": self.progress.errors,
             "started_at": self.progress.started_at,
             "finished_at": self.progress.finished_at,
@@ -119,6 +120,15 @@ class SyncOrchestrator:
                 for f in self._state.get("failed", {}).values()
             ] + self._soulseek_failures(),
         }
+
+    @staticmethod
+    def _needs_review() -> int:
+        """Downloads the checks queued for your ears (the review page) that you have not marked yet."""
+        try:
+            from review import pending_count
+            return pending_count()
+        except Exception:
+            return 0
 
     def _soulseek_failures(self) -> list[dict]:
         """Tracks Soulseek could not supply, for the "Retry failed" button (Soulseek source only)."""

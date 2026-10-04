@@ -19,7 +19,8 @@ APP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP))
 
 from models.track import TrackInfo  # noqa: E402
-from services import app_config, audio_formats, failure_log, soulseek, source_log, sync, tagging, verify_audio  # noqa: E402
+from services import app_config, audio_formats, audit_log, failure_log, soulseek, source_log, sync, tagging, verify_audio  # noqa: E402
+import review  # noqa: E402
 from services import rekordbox as rb  # noqa: E402
 
 REAL_ENQUEUE = soulseek.enqueue          # before any fixture replaces it with a fake
@@ -197,6 +198,10 @@ class SyncFixture(unittest.TestCase):
         mock.patch.object(failure_log, "FILE", self.tmp / "failed_tracks.json").start()
         mock.patch.object(failure_log, "CSV_FILE", self.tmp / "failed_tracks.csv").start()
         mock.patch.object(source_log, "FILE", self.tmp / "download_sources.csv").start()
+        mock.patch.object(audit_log, "FILE", self.tmp / "audit.csv").start()
+        mock.patch.object(review, "AUDIT_FILE", self.tmp / "audit.csv").start()
+        mock.patch.object(review, "MARKS_FILE", self.tmp / "review_marks.json").start()
+        mock.patch.object(review, "STATE_FILE", self.tmp / "sync_state.json").start()
         from services import rejected as _rejected
         mock.patch.object(_rejected, "FILE", self.tmp / "rejected_sources.json").start()
         app_config.save({"music_folder": str(self.music), "download_source": "soulseek", "output_formats": ["flac", "aiff"]})
@@ -1281,6 +1286,76 @@ class StandInTrackTest(SyncFixture):
         (self.tmp / "sync_state.json").write_text(json.dumps(state), encoding="utf-8")
         self.orchestrator().run_sync()
         self.assertEqual(self.nico.searches, [], "marked final: nothing to look for")
+
+
+class ReviewQueueTest(SyncFixture):
+    """The sync queues what its checks could not settle, and the main page is told how many need a human."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-real", "Real Song", "Somebody", 0)]
+
+    def queue(self):
+        import csv
+        try:
+            with (self.tmp / "audit.csv").open(newline="", encoding="utf-8-sig") as fh:
+                return list(csv.DictReader(fh))
+        except OSError:
+            return []
+
+    def test_a_download_whose_name_carries_a_version_the_title_lacks_is_queued(self):
+        self.nico.offer("Somebody", "Real Song", "song_a", "u1", "m/05 - Real Song (CZR's Peak Hour vocal mix).flac",
+                        {"4": 44100, "5": 16})
+        result = self.run_sync()
+        rows = self.queue()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("different mix?", rows[0]["verdict"])
+        self.assertIn("CZR's Peak Hour vocal mix", rows[0]["verdict"])
+        self.assertEqual((rows[0]["title"], rows[0]["playlist"]), ("Real Song", "Deep tech AIFF"))
+        self.assertEqual(result["needs_review"], 1, "the main page is told")
+
+    def test_a_partial_match_with_the_copy_you_already_had_is_queued_with_its_score(self):
+        ref = self.tmp / "Library" / "Somebody - Real Song.mp3"
+        make_audio(ref, "song_a_mp3")
+        self.rbfake.add_existing_playlist("MP3 playlist", {"Real Song": str(ref).replace("\\", "/")})
+        self.nico.offer("Somebody", "Real Song", "song_a", "u1", "m/01 - Real Song.flac", {"4": 44100, "5": 16})
+        with mock.patch.object(verify_audio, "compare", return_value=0.81):
+            self.run_sync()
+        rows = self.queue()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("different version?", rows[0]["verdict"])
+        self.assertEqual(float(rows[0]["similarity_to_reference"]), 0.81)
+        self.assertTrue(rows[0]["reference"].endswith("Somebody - Real Song.mp3"), "so the review page can play both")
+
+    def test_a_clean_download_is_not_queued(self):
+        self.nico.offer("Somebody", "Real Song", "song_a", "u1", "m/01 - Real Song.flac", {"4": 44100, "5": 16})
+        result = self.run_sync()
+        self.assertEqual(self.queue(), [])
+        self.assertEqual(result["needs_review"], 0)
+
+    def test_a_resync_does_not_queue_the_same_file_twice(self):
+        self.nico.offer("Somebody", "Real Song", "song_a", "u1", "m/05 - Real Song (Dub Mix).flac", {"4": 44100, "5": 16})
+        self.run_sync()
+        self.run_sync()
+        self.assertEqual(len(self.queue()), 1)
+
+    def test_marking_a_queued_track_removes_it_from_the_count(self):
+        self.nico.offer("Somebody", "Real Song", "song_a", "u1", "m/05 - Real Song (Dub Mix).flac", {"4": 44100, "5": 16})
+        self.run_sync()
+        self.assertEqual(review.pending_count(), 1)
+        item = review.load_items()[0]
+        review.review_mark(review.Mark(id=item["id"], mark="right"))
+        self.assertEqual(review.pending_count(), 0)
+        self.assertEqual(self.orchestrator().get_progress()["needs_review"], 0)
+
+    def test_a_file_made_from_one_we_already_had_is_not_queued(self):
+        self.nico.offer("Somebody", "Real Song", "song_a", "u1", "m/05 - Real Song (Dub Mix).flac", {"4": 44100, "5": 16})
+        self.run_sync()
+        queued = len(self.queue())
+        app_config.set_output_formats(["aiff", "wav"])
+        self.run_sync()
+        self.assertEqual(len(self.queue()), queued, "the WAV is made from the AIFF's source: nothing new to judge")
 
 
 class FlacWithoutAttributesTest(unittest.TestCase):

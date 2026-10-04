@@ -291,6 +291,8 @@
 
         <button class="sync-btn" id="syncBtn" onclick="startSync()">Sync</button>
         <button class="sync-btn retry-btn" id="retryBtn" onclick="startRetry()" style="display:none">Retry failed</button>
+        <a class="sync-btn" id="reviewBanner" href="/review" target="_blank" rel="noopener"
+           style="display:none;margin-top:8px;background:#b8860b;text-decoration:none;text-align:center"></a>
 
         <div class="card" id="statusCard" style="display:none">
             <div class="card-title">Status</div>
@@ -452,6 +454,12 @@
             updateRetryButton(data);
             document.getElementById('statusCard').style.display = 'block';
             document.getElementById('statusMessage').textContent = data.message || data.status;
+            const banner = document.getElementById('reviewBanner');
+            if (banner) {
+                const n = data.needs_review || 0;
+                banner.style.display = n > 0 ? 'block' : 'none';
+                banner.textContent = n > 0 ? `🎧 ${n} track${n === 1 ? '' : 's'} need your ears — open the review page` : '';
+            }
             document.getElementById('statusPhase').textContent = data.phase || '';
 
             // Stats
