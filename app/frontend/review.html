@@ -8,7 +8,7 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0f; color: #e0e0e0;
            min-height: 100vh; padding: 20px; }
-    .wrap { max-width: 980px; margin: 0 auto; }
+    .wrap { max-width: 1040px; margin: 0 auto; }
     h1 { font-size: 22px; color: #fff; font-weight: 600; }
     .sub { font-size: 13px; color: #777; margin: 4px 0 16px; }
     a { color: #1db954; }
@@ -20,27 +20,39 @@
     select, button { font: inherit; }
     select { background: #14141c; color: #e0e0e0; border: 1px solid #2a2a38; border-radius: 6px; padding: 8px 10px; }
     .card { background: #12121a; border: 1px solid #22222e; border-radius: 12px; padding: 18px; }
-    .head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+    .head { display: flex; gap: 14px; margin-bottom: 14px; align-items: flex-start; }
+    .cover { width: 84px; height: 84px; border-radius: 8px; background: #1c1c26; object-fit: cover; flex: none; }
+    .headtext { flex: 1; min-width: 0; }
     .title { font-size: 20px; color: #fff; font-weight: 600; }
     .artist { color: #aaa; margin-top: 2px; }
-    .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+    .meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .chip { font-size: 12px; padding: 4px 9px; border-radius: 999px; background: #1c1c26; color: #bbb; white-space: nowrap; }
     .chip.wrong { background: #3a1820; color: #ff8a9b; }
     .chip.grey { background: #3a2f12; color: #ffd166; }
     .chip.version { background: #1b2c3d; color: #7cc4ff; }
     .chip.stem { background: #2c1a3d; color: #d6a8ff; }
     .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    @media (max-width: 720px) { .panels { grid-template-columns: 1fr; } }
-    .panel { background: #0e0e15; border: 2px solid #22222e; border-radius: 10px; padding: 12px; transition: border-color .15s; }
+    @media (max-width: 800px) { .panels { grid-template-columns: 1fr; } }
+    .panel { background: #0e0e15; border: 2px solid #22222e; border-radius: 10px; padding: 12px; transition: border-color .15s; min-width: 0; }
     .panel.active { border-color: #1db954; }
-    .panel h2 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #888; margin-bottom: 4px; }
+    .panel h2 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #888; margin-bottom: 6px; }
     .panel .name { font-size: 13px; color: #ccc; word-break: break-all; margin-bottom: 8px; min-height: 2.6em; }
     .panel .missing { color: #ff8a9b; font-size: 13px; }
     audio { width: 100%; height: 40px; }
     .status { font-size: 12px; color: #888; margin-top: 6px; min-height: 1.4em; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+    .tab { background: #1c1c26; border: 1px solid #2a2a38; color: #bbb; border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+    .tab.on { background: #26263a; color: #fff; border-color: #4a4a68; }
+    .video { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; overflow: hidden; }
+    .video iframe, .video > div { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+    .ytinfo { font-size: 13px; margin: 8px 0 4px; color: #ddd; }
+    .ytinfo .ch { color: #888; }
+    .ytrow { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+    .note { font-size: 12px; color: #ffd166; margin-top: 6px; }
     .tools { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; align-items: center; }
     .btn { background: #1c1c26; color: #e0e0e0; border: 1px solid #2a2a38; border-radius: 8px; padding: 9px 14px; cursor: pointer; }
     .btn:hover { background: #242433; }
+    .btn.small { padding: 5px 10px; font-size: 12px; }
     .btn.primary { background: #1db954; border-color: #1db954; color: #04130a; font-weight: 600; }
     .btn.primary:hover { background: #1ed760; }
     .btn kbd { font: 11px ui-monospace, Consolas, monospace; background: #0a0a0f; border: 1px solid #333; border-radius: 4px;
@@ -74,8 +86,9 @@
 <body>
 <div class="wrap">
     <h1>Review flagged tracks</h1>
-    <div class="sub">Each flagged download next to the YouTube copy you already had. Listen to both, then mark which is right.
-        Nothing here changes your library — your marks are saved and used afterwards. <a href="/">Back to File Fetcher</a></div>
+    <div class="sub">Each flagged download next to the real track: the YouTube release video (with its artwork), Spotify's own copy,
+        or the older MP3 you had. Listen, then mark which is right. Nothing here changes your library — your marks are saved and used
+        afterwards. <a href="/">Back to File Fetcher</a></div>
 
     <div class="bar">
         <div class="progress">
@@ -99,21 +112,26 @@
 <div class="toast" id="toast" role="status" aria-live="polite"><span id="toastText"></span>
     <button class="btn" id="undoBtn">Undo <kbd>U</kbd></button></div>
 
+<script src="https://www.youtube.com/iframe_api" async></script>
 <script>
 const MARKS = [
     ['new_right', 'New file is right', '1'],
-    ['youtube_right', 'YouTube is right', '2'],
+    ['youtube_right', 'Reference is right', '2'],
     ['both_ok', 'Both fine', '3'],
     ['neither', 'Neither', '4'],
 ];
 let data = { items: [], marked: 0, total: 0 };
 let view = [];           // the items the current filter shows
 let pos = 0;             // index into view
-let active = 'new';      // which of the two players is "live" for the keyboard
+let active = 'new';      // which source is "live" for the keyboard: 'new' or the chosen reference
+let refTab = 'yt';       // the reference shown on the right: 'yt' | 'old' | 'sp'
+try { refTab = localStorage.getItem('reviewRefTab') || 'yt'; } catch (e) {}
+let ytApiReady = false, ytPlayer = null, ytResults = [], ytIndex = 0, ytReady = false;
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt = s => isFinite(s) ? Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0') : '–';
+const fmt = s => isFinite(s) && s != null ? Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0') : '–';
+window.onYouTubeIframeAPIReady = () => { ytApiReady = true; if (refTab === 'yt' && view[pos]) mountYouTube(); };
 
 async function load(keepId) {
     data = await (await fetch('/api/review/items')).json();
@@ -139,6 +157,7 @@ function groupChip(it) {
 }
 
 function render() {
+    destroyYouTube();
     const done = data.marked, total = data.total;
     $('fill').style.width = total ? (100 * done / total) + '%' : '0';
     $('progressLabel').textContent = `${done} of ${total} marked`;
@@ -153,15 +172,29 @@ function render() {
     stage.innerHTML = `
     <div class="card">
         <div class="head">
-            <div>
+            <img class="cover" src="/api/review/cover/${it.id}" alt="Cover art" onerror="this.style.visibility='hidden'">
+            <div class="headtext">
                 <div class="title">${esc(it.title)}</div>
                 <div class="artist">${esc(it.artist)} · ${esc(it.playlist)}</div>
+                <div class="meta">${groupChip(it)}${it.bass_share ? `<span class="chip">bass ${esc(it.bass_share)}</span>` : ''}</div>
             </div>
-            <div class="meta">${groupChip(it)}${it.bass_share ? `<span class="chip">bass ${esc(it.bass_share)}</span>` : ''}</div>
         </div>
         <div class="panels">
-            ${panel('new', 'New · from Soulseek', it.new_name, it.has_new, it.id)}
-            ${panel('old', 'YouTube · what you had', it.old_name, it.has_old, it.id)}
+            <div class="panel active" id="panel-new">
+                <h2>New · from Soulseek</h2>
+                <div class="name">${it.has_new ? esc(it.new_name) : '<span class="missing">File not found</span>'}</div>
+                ${it.has_new ? `<audio id="audio-new" controls preload="none" src="/api/review/audio/${it.id}/new"></audio>` : ''}
+                <div class="status" id="status-new"></div>
+            </div>
+            <div class="panel" id="panel-ref">
+                <h2>Reference · the real track</h2>
+                <div class="tabs">
+                    <button class="tab ${refTab === 'yt' ? 'on' : ''}" data-tab="yt">YouTube video</button>
+                    <button class="tab ${refTab === 'sp' ? 'on' : ''}" data-tab="sp">Spotify</button>
+                    <button class="tab ${refTab === 'old' ? 'on' : ''}" data-tab="old">Old MP3</button>
+                </div>
+                <div id="ref-body"></div>
+            </div>
         </div>
         <div class="tools">
             <button class="btn primary" id="switchBtn" title="Swap to the other version at the same position">Switch A/B <kbd>Tab</kbd></button>
@@ -182,68 +215,162 @@ function render() {
                 <button class="btn" id="nextBtn">Skip / next →</button>
             </span>
         </div>
-        <div class="hint">Shortcuts: <b>Space</b> play/pause · <b>Tab</b> switch version (keeps your place) · <b>1 2 3 4</b> mark · <b>U</b> undo · <b>← →</b> previous/next · <b>[ ]</b> seek.
-            The first play of an AIFF takes a few seconds while it is prepared for the browser.</div>
+        <div class="hint">Shortcuts: <b>Space</b> play/pause · <b>Tab</b> switch version (keeps your place) · <b>1 2 3 4</b> mark · <b>U</b> undo ·
+            <b>← →</b> previous/next · <b>[ ]</b> seek. The first play of an AIFF takes a few seconds while it is prepared for the browser.
+            Spotify's player can't be synced to a position, so use it to confirm which song it is.</div>
     </div>`;
     wire(it);
+    showRef(it);
 }
 
-function panel(which, heading, name, exists, id) {
-    return `<div class="panel ${which === 'new' ? 'active' : ''}" id="panel-${which}">
-        <h2>${heading}</h2>
-        <div class="name">${exists ? esc(name) : '<span class="missing">File not found</span>'}</div>
-        ${exists ? `<audio id="audio-${which}" controls preload="none" src="/api/review/audio/${id}/${which}"></audio>` : ''}
-        <div class="status" id="status-${which}"></div>
-    </div>`;
+// ---------------------------------------------------------------- the reference panel
+function showRef(it) {
+    destroyYouTube();
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === refTab));
+    const body = $('ref-body');
+    if (refTab === 'sp') {
+        body.innerHTML = it.spotify_id
+            ? `<iframe style="border-radius:10px;width:100%;height:152px;border:0" src="https://open.spotify.com/embed/track/${esc(it.spotify_id)}"
+                       allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
+               <div class="status">Spotify's own copy of this track (the one in your playlist). A short preview unless you are signed in to Spotify in this browser.</div>`
+            : '<div class="missing">No Spotify id recorded for this track.</div>';
+        return;
+    }
+    if (refTab === 'old') {
+        body.innerHTML = `<div class="name">${it.has_old ? esc(it.old_name) : '<span class="missing">No older MP3 found</span>'}</div>
+            ${it.has_old ? `<audio id="audio-old" controls preload="none" src="/api/review/audio/${it.id}/old"></audio>` : ''}
+            <div class="status" id="status-old"></div>
+            <div class="note">This MP3 came from sff's automatic YouTube search, so it can be wrong too.</div>`;
+        const p = $('audio-old');
+        if (p) hookAudio(p, 'old');
+        return;
+    }
+    body.innerHTML = `<div class="video"><div id="yt-holder"></div></div>
+        <div class="ytinfo" id="yt-info">Searching YouTube…</div>
+        <div class="ytrow" id="yt-row"></div>`;
+    loadYoutube(it);
 }
 
-function player(which) { return $('audio-' + which); }
-function other() { return active === 'new' ? 'old' : 'new'; }
+async function loadYoutube(it) {
+    const id = it.id;
+    try {
+        const r = await fetch('/api/review/youtube/' + id);
+        if (!r.ok) throw new Error((await r.json()).detail || r.status);
+        const d = await r.json();
+        if (view[pos]?.id !== id) return;                  // moved on while searching
+        ytResults = d.results; ytIndex = 0;
+        if (!ytResults.length) { $('yt-info').textContent = 'YouTube found nothing for “' + d.query + '”.'; return; }
+        mountYouTube();
+    } catch (e) {
+        if ($('yt-info')) $('yt-info').innerHTML = `<span class="missing">Could not reach YouTube (${esc(e.message)}).</span>`;
+    }
+}
+
+function mountYouTube() {
+    if (!ytResults.length || !$('yt-holder')) return;
+    const v = ytResults[ytIndex];
+    $('yt-info').innerHTML = `<b>${esc(v.title)}</b> <span class="ch">· ${esc(v.channel)} · ${fmt(v.duration)}</span>`;
+    $('yt-row').innerHTML = `
+        <button class="btn small" id="ytNext">Next result (${ytIndex + 1}/${ytResults.length})</button>
+        <a class="btn small" href="${esc(v.url)}" target="_blank" rel="noopener" style="text-decoration:none">Open on YouTube ↗</a>
+        <span class="status" id="status-yt"></span>`;
+    $('ytNext').onclick = () => { destroyYouTube(); ytIndex = (ytIndex + 1) % ytResults.length; mountYouTube(); };
+    if (!ytApiReady) { $('status-yt').textContent = 'Loading the YouTube player…'; return; }
+    const holder = $('yt-holder');
+    ytReady = false;
+    ytPlayer = new YT.Player(holder, {
+        videoId: v.id, host: 'https://www.youtube-nocookie.com',
+        playerVars: { rel: 0, modestbranding: 1, playsinline: 1 },
+        events: {
+            onReady: () => { ytReady = true; },
+            onStateChange: e => { if (e.data === 1) setActive('yt'); },
+            onError: () => { const s = $('status-yt'); if (s) s.innerHTML = '<span class="missing">The uploader blocks embedding — use “Open on YouTube”, or try the next result.</span>'; },
+        },
+    });
+}
+
+function destroyYouTube() {
+    try { if (ytPlayer && ytPlayer.destroy) ytPlayer.destroy(); } catch (e) {}
+    ytPlayer = null; ytReady = false;
+    const h = document.getElementById('ref-body');
+    if (h && refTab === 'yt' && !document.getElementById('yt-holder')) { /* rebuilt by showRef */ }
+}
+
+// ---------------------------------------------------------------- one interface over the players
+function ctl(which) {
+    if (which === 'new' || which === 'old') {
+        const a = $('audio-' + which);
+        if (!a) return null;
+        return {
+            time: () => a.currentTime, playing: () => !a.paused, pause: () => a.pause(),
+            seek: t => new Promise(res => { const go = () => { a.currentTime = t; res(); };
+                                            a.readyState >= 1 ? go() : (a.preload = 'auto', a.addEventListener('loadedmetadata', go, { once: true }), a.load()); }),
+            play: () => a.play(),
+        };
+    }
+    if (which === 'yt' && ytPlayer && ytReady) {
+        return { time: () => ytPlayer.getCurrentTime(), playing: () => ytPlayer.getPlayerState() === 1, pause: () => ytPlayer.pauseVideo(),
+                 seek: t => { ytPlayer.seekTo(t, true); return Promise.resolve(); }, play: () => ytPlayer.playVideo() };
+    }
+    return null;
+}
+
+function refKey() { return refTab; }          // 'yt' | 'old' | 'sp'
+function other() { return active === 'new' ? refKey() : 'new'; }
 
 function setActive(which) {
     active = which;
-    for (const w of ['new', 'old']) $('panel-' + w)?.classList.toggle('active', w === which);
+    $('panel-new')?.classList.toggle('active', which === 'new');
+    $('panel-ref')?.classList.toggle('active', which !== 'new');
 }
 
-function switchAB() {
-    const from = player(active), to = player(other());
-    if (!to) return;
-    const t = from ? from.currentTime : 0, wasPlaying = from && !from.paused;
+async function switchAB() {
+    const target = other();
+    const from = ctl(active), to = ctl(target);
+    if (!to) { toast(target === 'sp' ? "Spotify's player can't be synced — press play in it yourself." : 'That player is not ready yet.'); return; }
+    const t = from ? from.time() : 0, wasPlaying = from && from.playing();
     if (from) from.pause();
-    const go = () => { to.currentTime = t; if (wasPlaying) to.play(); };
-    setActive(other());
-    to.readyState >= 1 ? go() : (to.addEventListener('loadedmetadata', go, { once: true }), to.load());
+    setActive(target);
+    await to.seek(t);
+    if (wasPlaying) to.play();
 }
 
 function togglePlay() {
-    const p = player(active);
-    if (!p) return;
-    const o = player(other());
-    if (o) o.pause();
-    p.paused ? p.play() : p.pause();
+    const cur = ctl(active);
+    if (!cur) return;
+    for (const w of ['new', 'old', 'yt']) { if (w !== active) ctl(w)?.pause(); }
+    cur.playing() ? cur.pause() : cur.play();
 }
 
-function jump(spec) {
-    const p = player(active);
-    if (!p) return;
-    const apply = () => { p.currentTime = spec[0] === '+' || spec[0] === '-' ? Math.max(0, p.currentTime + Number(spec)) : Number(spec); };
-    p.readyState >= 1 ? apply() : (p.addEventListener('loadedmetadata', apply, { once: true }), p.load());
+async function jump(spec) {
+    const cur = ctl(active);
+    if (!cur) return;
+    const rel = spec[0] === '+' || spec[0] === '-';
+    await cur.seek(rel ? Math.max(0, cur.time() + Number(spec)) : Number(spec));
+}
+
+function hookAudio(p, w) {
+    p.addEventListener('play', () => { setActive(w); for (const o of ['new', 'old']) if (o !== w) ctl(o)?.pause(); ctl('yt')?.pause(); });
+    p.addEventListener('waiting', () => { const s = $('status-' + w); if (s) s.textContent = 'Preparing…'; });
+    p.addEventListener('playing', () => { const s = $('status-' + w); if (s) s.textContent = ''; });
+    p.addEventListener('loadedmetadata', () => { const s = $('status-' + w); if (s) s.textContent = 'Length ' + fmt(p.duration); });
+    p.addEventListener('error', () => { const s = $('status-' + w); if (s) s.textContent = 'Could not play this file'; });
 }
 
 function wire(it) {
-    for (const w of ['new', 'old']) {
-        const p = player(w);
-        if (!p) continue;
-        p.addEventListener('play', () => { setActive(w); const o = player(w === 'new' ? 'old' : 'new'); if (o) o.pause(); });
-        p.addEventListener('waiting', () => $('status-' + w).textContent = 'Preparing…');
-        p.addEventListener('playing', () => $('status-' + w).textContent = '');
-        p.addEventListener('loadedmetadata', () => $('status-' + w).textContent = 'Length ' + fmt(p.duration));
-        p.addEventListener('error', () => $('status-' + w).textContent = 'Could not play this file');
-    }
+    const n = $('audio-new');
+    if (n) hookAudio(n, 'new');
     $('switchBtn').onclick = switchAB;
     $('playBtn').onclick = togglePlay;
     document.querySelectorAll('[data-jump]').forEach(b => b.onclick = () => jump(b.dataset.jump));
     document.querySelectorAll('[data-mark]').forEach(b => b.onclick = () => mark(it, b.dataset.mark));
+    document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
+        stopAll();
+        refTab = b.dataset.tab;
+        try { localStorage.setItem('reviewRefTab', refTab); } catch (e) {}
+        setActive('new');
+        showRef(it);
+    });
     $('prevBtn').onclick = () => go(-1);
     $('nextBtn').onclick = () => go(1);
     if ($('clearBtn')) $('clearBtn').onclick = () => mark(it, null);
@@ -256,7 +383,7 @@ function go(d) {
     render();
 }
 
-function stopAll() { for (const w of ['new', 'old']) player(w)?.pause(); }
+function stopAll() { for (const w of ['new', 'old', 'yt']) { try { ctl(w)?.pause(); } catch (e) {} } }
 
 let lastMark = null, toastTimer = null;
 
@@ -265,8 +392,9 @@ async function setMark(id, value) {
                                       body: JSON.stringify({ id, mark: value }) });
 }
 
-function toast(text) {
+function toast(text, withUndo = false) {
     $('toastText').textContent = text;
+    $('undoBtn').style.display = withUndo ? '' : 'none';
     $('toast').classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => $('toast').classList.remove('show'), 10000);
@@ -276,7 +404,7 @@ async function mark(it, value) {
     stopAll();
     lastMark = { id: it.id, prev: it.mark };
     await setMark(it.id, value);
-    if (value) toast(`Marked “${it.title}”: ${MARKS.find(m => m[0] === value)[1]}`);
+    if (value) toast(`Marked “${it.title}”: ${MARKS.find(m => m[0] === value)[1]}`, true);
     const wasUnmarkedView = $('filter').value === 'unmarked';
     const nextId = view[(pos + 1) % view.length]?.id;
     await load(wasUnmarkedView && value ? nextId : it.id);

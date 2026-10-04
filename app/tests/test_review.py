@@ -95,5 +95,41 @@ class ReviewTest(unittest.TestCase):
         self.assertEqual(Path(response.path), playable)
 
 
+    def test_items_carry_the_spotify_id_for_the_embedded_player(self):
+        self.assertEqual(self.items["Pleasure Love"]["spotify_id"], "t1")
+        self.assertEqual(self.items["Time After Time"]["spotify_id"], "")
+
+    def test_youtube_results_are_searched_by_artist_and_title_and_cached(self):
+        found = [{"id": "abc123", "title": "Pleasure Love", "channel": "Supafly - Topic", "duration": 210, "url": "u"}]
+        review._yt_cache.clear()
+        with mock.patch.object(review, "_youtube_search", return_value=found) as search:
+            first = review.review_youtube(self.items["Pleasure Love"]["id"])
+            again = review.review_youtube(self.items["Pleasure Love"]["id"])
+        self.assertEqual(first["results"], found)
+        self.assertEqual(first["query"], "Supafly & De Funk Pleasure Love")
+        search.assert_called_once()                                    # the second look did not search again
+        self.assertEqual(again, first)
+
+    def test_a_failed_youtube_search_is_a_clean_502_and_an_unknown_item_a_404(self):
+        review._yt_cache.clear()
+        with mock.patch.object(review, "_youtube_search", side_effect=RuntimeError("offline")):
+            with self.assertRaises(HTTPException) as ctx:
+                review.review_youtube(self.items["Pleasure Love"]["id"])
+        self.assertEqual(ctx.exception.status_code, 502)
+        with self.assertRaises(HTTPException) as ctx:
+            review.review_youtube("deadbeef0000")
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_the_cover_comes_from_the_new_file_and_is_a_404_when_there_is_none(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 20
+        with mock.patch("services.tagging.embedded_picture", return_value=png):
+            response = review.review_cover(self.items["Pleasure Love"]["id"])
+        self.assertEqual((response.media_type, response.body), ("image/png", png))
+        with mock.patch("services.tagging.embedded_picture", return_value=None):
+            with self.assertRaises(HTTPException) as ctx:
+                review.review_cover(self.items["Pleasure Love"]["id"])
+        self.assertEqual(ctx.exception.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

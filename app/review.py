@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -42,8 +42,8 @@ def _item_id(new_file: str) -> str:
     return hashlib.md5(new_file.lower().encode("utf-8")).hexdigest()[:12]
 
 
-def _artists_by_file() -> dict[str, str]:
-    """new file path -> artist, from the sync state (the audit only recorded titles)."""
+def _tracks_by_file() -> dict[str, dict]:
+    """new file path -> {artist, title, spotify_id}, from the sync state (the audit only recorded titles)."""
     try:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -51,8 +51,9 @@ def _artists_by_file() -> dict[str, str]:
     out = {}
     for pl in state.get("playlists", {}).values():
         for variant in (pl.get("variants") or {}).values():
-            for rec in (variant.get("tracks") or {}).values():
-                out[str(rec.get("file_path", "")).replace("\\", "/").lower()] = rec.get("artist", "")
+            for spotify_id, rec in (variant.get("tracks") or {}).items():
+                out[str(rec.get("file_path", "")).replace("\\", "/").lower()] = {
+                    "artist": rec.get("artist", ""), "title": rec.get("title", ""), "spotify_id": spotify_id}
     return out
 
 
@@ -80,7 +81,7 @@ def load_items() -> list[dict]:
     except OSError:
         return []
     marks = load_marks()
-    artists = _artists_by_file()
+    known = _tracks_by_file()
     items = []
     for r in rows:
         new_file, ref = r.get("new_file", ""), r.get("reference", "")
@@ -91,7 +92,8 @@ def load_items() -> list[dict]:
             sim = None
         items.append({
             "id": iid, "playlist": r.get("playlist", ""), "title": r.get("title", ""),
-            "artist": artists.get(new_file.replace("\\", "/").lower(), ""),
+            "artist": known.get(new_file.replace("\\", "/").lower(), {}).get("artist", ""),
+            "spotify_id": known.get(new_file.replace("\\", "/").lower(), {}).get("spotify_id", ""),
             "verdict": r.get("verdict", ""), "group": _group(r), "similarity": sim,
             "bass_share": r.get("bass_share") or None,
             "new_name": Path(new_file).name, "old_name": Path(ref).name if ref else "",
@@ -137,6 +139,19 @@ def _playable(path: Path) -> Path:
     return out
 
 
+_yt_cache: dict[str, list[dict]] = {}
+
+
+def _youtube_search(query: str, limit: int = 5) -> list[dict]:
+    """Top YouTube results for a query: id, title, channel, length. (Nothing is downloaded.)"""
+    from yt_dlp import YoutubeDL
+    with YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}) as ydl:
+        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+    return [{"id": e["id"], "title": e.get("title", ""), "channel": e.get("channel") or e.get("uploader") or "",
+             "duration": e.get("duration"), "url": f"https://www.youtube.com/watch?v={e['id']}"}
+            for e in (info.get("entries") or []) if e and e.get("id")]
+
+
 class Mark(BaseModel):
     id: str
     mark: str | None = None       # one of MARKS, or null to clear
@@ -167,6 +182,36 @@ def review_audio(item_id: str, which: str):
         raise HTTPException(status_code=404, detail="That file is missing")
     playable = _playable(path)
     return FileResponse(str(playable), media_type="audio/mpeg" if playable.suffix == ".mp3" else None)
+
+
+@router.get("/api/review/youtube/{item_id}")
+def review_youtube(item_id: str):
+    """The video(s) YouTube finds for this track, so the real thing can be watched and heard."""
+    item = next((i for i in load_items() if i["id"] == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Unknown item")
+    if item_id not in _yt_cache:
+        artist = item["artist"].split(",")[0].strip()
+        try:
+            _yt_cache[item_id] = _youtube_search(f"{artist} {item['title']}".strip())
+        except Exception as e:                       # offline, YouTube changed, yt-dlp missing...
+            logger.warning("YouTube search failed for %s: %s", item["title"], e)
+            raise HTTPException(status_code=502, detail="Could not search YouTube right now")
+    return {"query": f"{item['artist'].split(',')[0].strip()} {item['title']}", "results": _yt_cache[item_id]}
+
+
+@router.get("/api/review/cover/{item_id}")
+def review_cover(item_id: str):
+    """The artwork embedded in the new file: Spotify's cover for the track it was meant to be."""
+    new, _ = _paths(item_id)
+    if not new.is_file():
+        raise HTTPException(status_code=404, detail="That file is missing")
+    from services import tagging
+    picture = tagging.embedded_picture(new)
+    if not picture:
+        raise HTTPException(status_code=404, detail="No cover art in this file")
+    return Response(content=picture, media_type="image/png" if picture[:4] == b"\x89PNG" else "image/jpeg",
+                    headers={"Cache-Control": "max-age=3600"})
 
 
 @router.post("/api/review/mark")
