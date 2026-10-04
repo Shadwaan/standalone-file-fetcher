@@ -4,35 +4,6 @@ Watches your Spotify "FF"-prefixed playlists, downloads new tracks — from YouT
 
 ---
 
-## Moving your library to another computer (no re-downloading)
-
-Copying the music folder is not enough: the playlists, their order, the version labels, the songs you chose to keep
-and which labelled mixes sff is still looking for the real version of all live in Rekordbox and in sff's own records.
-The **manifest** carries all of it.
-
-**On the computer that has the playlists** (this only reads):
-
-```
-cd app
-python manifest.py export --music-root D:/Music/Incoming --out E:/Music/Incoming/sff_manifest.json
-```
-
-Copy the music (the playlist folders, not `_originals` / `_rejected`) and `sff_manifest.json` to the other computer or an SSD.
-Run the export again after any later change, so the manifest is current.
-
-**On the other computer** (install sff there first; **close Rekordbox**):
-
-```
-cd app
-python manifest.py import --manifest /Volumes/SSD/Music/Incoming/sff_manifest.json --music-root /Volumes/SSD/Music/Incoming
-```
-
-That first run is a **dry run**: it only prints what it found and what is missing. Add `--apply` to build the Rekordbox playlists
-(in order, with the exact titles) and to write sff's records using this computer's paths. Rekordbox's database is backed up first,
-and the import is safe to repeat. Nothing is downloaded, so later syncs there only fetch what is new.
-
----
-
 ## How to use it
 
 ### 1. Install Python (one time)
@@ -121,6 +92,35 @@ sff will start Nicotine+ for you automatically on the next Sync if it isn't alre
 - A Soulseek sync can run for a long time (searching, then waiting on other people's uploads). Rekordbox must be closed when you **start** it, but once downloads are underway you can open Rekordbox freely: sff only touches its library at the very end, and if Rekordbox is open at that point it **waits for you to close it** instead of importing into an open database. The auto-shutdown that follows the browser tab closing also holds off until the sync finishes.
 - Already have the file? Before searching, sff checks Nicotine+'s download folder and its existing queue, so tracks from an interrupted sync are picked up instead of re-downloaded. This assumes Nicotine+ saves to `D:\Music\Nicotine`; if yours saves elsewhere, set `NICOTINE_DOWNLOAD_DIR` in `app/.env`.
 - **Lossy-transcode check.** Every lossless file is checked, as downloaded, for the tell-tale cutoff of an MP3 re-wrapped as FLAC/WAV/AIFF (a sharp cliff in the spectrum around 16–20 kHz). Suspects are flagged in the sync results but kept. In testing it caught every 128/192/256 kbps transcode with no false alarms on 34 genuine files; a **320 kbps** transcode can't be told apart from a genuine file, so treat "not flagged" as "no evidence of fakery", not proof.
+
+---
+
+## Moving your library to another computer (no re-downloading)
+
+Copying the music folder is not enough: the playlists, their order, the version labels, the songs you chose to keep
+and which labelled mixes sff is still looking for the real version of all live in Rekordbox and in sff's own records.
+The **manifest** carries all of it.
+
+**On the computer that has the playlists** (this only reads):
+
+```
+cd app
+python manifest.py export --music-root D:/Music/Incoming --out E:/Music/Incoming/sff_manifest.json
+```
+
+Copy the music (the playlist folders, not `_originals` / `_rejected`) and `sff_manifest.json` to the other computer or an SSD.
+Run the export again after any later change, so the manifest is current.
+
+**On the other computer** (install sff there first; **close Rekordbox**):
+
+```
+cd app
+python manifest.py import --manifest /Volumes/SSD/Music/Incoming/sff_manifest.json --music-root /Volumes/SSD/Music/Incoming
+```
+
+That first run is a **dry run**: it only prints what it found and what is missing. Add `--apply` to build the Rekordbox playlists
+(in order, with the exact titles) and to write sff's records using this computer's paths. Rekordbox's database is backed up first,
+and the import is safe to repeat. Nothing is downloaded, so later syncs there only fetch what is new.
 
 ---
 
