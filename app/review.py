@@ -10,6 +10,7 @@ Nothing else here changes your library.
 """
 import csv
 import hashlib
+from datetime import datetime
 import json
 import logging
 import re
@@ -30,6 +31,7 @@ from services import audit_log  # noqa: E402
 
 AUDIT_FILE = audit_log.FILE
 MARKS_FILE = APP_DIR / "review_marks.json"
+HISTORY_FILE = APP_DIR / "review_history.jsonl"
 CACHE_DIR = APP_DIR / ".review_cache"
 STATE_FILE = APP_DIR / "sync_state.json"
 PAGE = APP_DIR / "frontend" / "review.html"
@@ -106,7 +108,9 @@ def load_items() -> list[dict]:
             "verdict": r.get("verdict", ""), "group": _group(r), "similarity": sim,
             "bass_share": r.get("bass_share") or None,
             "new_name": Path(new_file).name, "old_name": Path(ref).name if ref else "",
-            "has_new": Path(new_file).is_file(), "has_old": bool(ref) and Path(ref).is_file(),
+            "has_new": _where_now(new_file, marks.get(iid) or {}).is_file(), "has_old": bool(ref) and Path(ref).is_file(),
+            "removed_from": (_where_now(new_file, marks.get(iid) or {}).parent.parent.name
+                             if (marks.get(iid) or {}).get("rejected") else ""),
             "mark": (marks.get(iid) or {}).get("mark"),
             "label": (marks.get(iid) or {}).get("label", ""),
             "note": (marks.get(iid) or {}).get("note", ""),
@@ -150,13 +154,27 @@ def load_marks() -> dict:
     return marks
 
 
+def _where_now(new_file: str, entry: dict) -> Path:
+    """The new file's current location: a file marked wrong and removed is in its playlist folder's _rejected."""
+    path = Path(new_file)
+    if entry.get("rejected"):
+        recorded = entry.get("rejected_path")
+        if recorded and Path(recorded).is_file():
+            return Path(recorded)
+        candidate = path.parent / "_rejected" / path.name
+        if candidate.is_file():
+            return candidate
+    return path
+
+
 def _paths(item_id: str) -> tuple[Path | None, Path | None]:
     """The two files of one flagged item. Only files named in the audit can ever be served."""
+    marks = load_marks()
     with AUDIT_FILE.open(newline="", encoding="utf-8-sig") as fh:
         for r in csv.DictReader(fh):
             if _item_id(r.get("new_file", "")) == item_id:
                 ref = r.get("reference", "")
-                return Path(r["new_file"]), (Path(ref) if ref else None)
+                return _where_now(r["new_file"], marks.get(item_id) or {}), (Path(ref) if ref else None)
     raise HTTPException(status_code=404, detail="Unknown item")
 
 
@@ -213,6 +231,19 @@ get_orchestrator = None
 
 def _save_marks(marks: dict) -> None:
     MARKS_FILE.write_text(json.dumps(marks, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def _log_change(item_id: str, action: str, before: dict, after: dict) -> None:
+    """Append what changed to review_history.jsonl, so a mark that looks wrong can be traced to what set it."""
+    if before == after:
+        return
+    try:
+        title = next((i["title"] for i in load_items() if i["id"] == item_id), "")
+        with HISTORY_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"time": datetime.now().isoformat(timespec="seconds"), "id": item_id, "title": title,
+                                 "action": action, "before": before, "after": after}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 @router.get("/review")
@@ -281,6 +312,7 @@ def review_mark(body: Mark):
     with _lock:
         marks = load_marks()
         entry = marks.get(body.id, {})
+        before = json.loads(json.dumps(entry))
         entry.pop("mark_from_keep", None)       # a mark you set yourself is yours to keep
         if body.mark is None:
             entry.pop("mark", None)
@@ -291,6 +323,7 @@ def review_mark(body: Mark):
         else:
             marks.pop(body.id, None)
         _save_marks(marks)
+        _log_change(body.id, f"mark -> {body.mark}", before, entry)
     return JSONResponse({"ok": True})
 
 
@@ -302,6 +335,7 @@ def review_note(body: Note):
     with _lock:
         marks = load_marks()
         entry = marks.get(body.id, {})
+        before = json.loads(json.dumps(entry))
         for key, value in (("label", " ".join(body.label.split())), ("note", body.note.strip())):
             if value:
                 entry[key] = value
@@ -327,6 +361,7 @@ def review_note(body: Note):
         else:
             marks.pop(body.id, None)
         _save_marks(marks)
+        _log_change(body.id, "note/label/keep saved", before, entry)
     return JSONResponse({"ok": True})
 
 
@@ -353,6 +388,9 @@ def _current_playlist_of(path: Path) -> str:
     return ""
 
 
+_last_rejected_to: dict[str, str] = {}
+
+
 def _reject_file(path: Path, item: dict) -> str | None:
     """A file marked wrong: take it out of its Rekordbox playlist, put the file aside (never deleted) in
     the playlist folder's _rejected, point Rekordbox at the moved file so nothing reads as missing, forget
@@ -372,6 +410,7 @@ def _reject_file(path: Path, item: dict) -> str | None:
     from services.audio_formats import unique_path
     dest = unique_path(aside, path.stem, path.suffix.lstrip("."))
     shutil.move(str(path), str(dest))
+    _last_rejected_to[path.as_posix()] = dest.as_posix()
     if not rb.update_content_path(path.as_posix(), dest.as_posix()):
         logger.warning("Rekordbox did not accept the moved path for %s; its entry may show as missing", path.name)
     _detach_from_spotify_track(path)
@@ -495,6 +534,61 @@ def _detach_from_spotify_track(path: Path) -> None:
         save()
 
 
+class Restore(BaseModel):
+    id: str
+    label: str = ""               # the mix name to show in the title, e.g. "other mix"
+
+
+@router.post("/api/review/restore")
+def review_restore(body: Restore):
+    """Put a file that was marked wrong and removed back into its playlist, labelled as a different mix.
+    It comes back as a stand-in: sff keeps looking for the mix Spotify actually lists."""
+    if _rekordbox_running():
+        raise HTTPException(status_code=409, detail="Close Rekordbox first: its library can't be edited while it is open.")
+    if not re.fullmatch(r"[0-9a-f]{12}", body.id):
+        raise HTTPException(status_code=400, detail="Bad id")
+    from services import rekordbox as rb
+    from services import tagging
+    from services.audio_formats import unique_path
+    import shutil
+    label = " ".join(body.label.split())
+    if not label:
+        raise HTTPException(status_code=400, detail="Give the mix a name, so the playlist shows what it is.")
+    with _lock:
+        marks = load_marks()
+        entry = marks.get(body.id) or {}
+        if not entry.get("rejected"):
+            raise HTTPException(status_code=400, detail="That file has not been removed.")
+        item = next(i for i in load_items() if i["id"] == body.id)
+        aside = _paths(body.id)[0]
+        if not aside.is_file():
+            raise HTTPException(status_code=404, detail="The set-aside file is missing.")
+        home = aside.parent.parent                                   # the playlist's own folder
+        playlist = home.name
+        pid = rb.find_playlist_id(playlist)
+        if not pid:
+            raise HTTPException(status_code=404, detail=f"The Rekordbox playlist '{playlist}' was not found.")
+        dest = unique_path(home, aside.stem, aside.suffix.lstrip("."))
+        shutil.move(str(aside), str(dest))
+        title = with_label(item["title"], label)
+        if not rb.update_content_path(aside.as_posix(), dest.as_posix()):
+            shutil.move(str(dest), str(aside))
+            raise HTTPException(status_code=500, detail="Rekordbox did not accept the file's location; nothing was changed.")
+        rb.set_title_by_path(dest.as_posix(), title)
+        tagging.set_title(dest, title)
+        content_id = rb.find_content_by_path(dest.as_posix())
+        count = len(rb.get_playlist_track_paths(pid))
+        if not (content_id and rb.add_track_to_playlist(pid, content_id, count + 1)):
+            raise HTTPException(status_code=500, detail="The file was moved back but could not be added to the playlist.")
+        for key in ("rejected", "rejected_path"):
+            entry.pop(key, None)
+        entry.update({"mark": "right", "label": label, "applied_label": label})
+        entry["standin_set"] = False                      # the next sync records it as a stand-in (labelled entry, no plain one)
+        marks[body.id] = entry
+        _save_marks(marks)
+    return {"restored": title, "playlist": playlist}
+
+
 @router.post("/api/review/apply-labels")
 def review_apply_labels():
     """Write each track's version label into its Rekordbox title and its file's title tag. A label that
@@ -534,6 +628,7 @@ def review_apply_labels():
                 outcome = _reject_file(path, item)
                 if outcome:
                     entry["rejected"] = True
+                    entry["rejected_path"] = _last_rejected_to.get(path.as_posix(), "")
                     marks[item["id"]] = entry
                     applied.append({"title": item["title"], "now": f"removed from {outcome}; the file is kept in _rejected"})
                 else:

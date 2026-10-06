@@ -111,6 +111,10 @@
     .modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
     .modal .warn { color: #ffd166; }
     .modal .bad { color: #ff8a9b; }
+    .restore { border: 1px dashed #5a4a1a; background: #1c1708; border-radius: 10px; padding: 12px 14px; font-size: 14px; color: #e6d9a8; line-height: 1.5; }
+    .restore code { background: #0a0a0f; padding: 1px 5px; border-radius: 4px; }
+    .restorerow { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .restorerow input { flex: 1 1 260px; background: #0e0e15; color: #e8e8e8; border: 1px solid #2a2a38; border-radius: 8px; padding: 9px 10px; font: inherit; }
     .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #1f1f2c; border: 1px solid #3a3a4e;
              border-radius: 10px; padding: 10px 14px; display: none; gap: 14px; align-items: center; box-shadow: 0 8px 30px #000a;
              font-size: 14px; z-index: 10; max-width: 92vw; }
@@ -269,9 +273,15 @@ function render() {
                 <div class="preview" id="keepPreview"></div>
             </div>
         </div>
-        <div class="marks">
+        ${it.rejected ? `<div class="restore">
+            <b>This file was taken out of ${esc(it.removed_from || 'its playlist')}</b> (it is kept in <code>_rejected</code>, not deleted).
+            It was a different mix you want to keep after all? Name the mix and put it back — it comes back labelled, and sff goes on
+            looking for the real one.
+            <div class="restorerow"><input id="restoreLabel" maxlength="80" placeholder="the mix name, e.g. the file's version, or “other mix”" autocomplete="off">
+            <button class="btn primary" id="restoreBtn">Put it back in ${esc(it.removed_from || 'the playlist')}</button></div>
+            <div class="note">Rekordbox must be closed.</div></div>` : `<div class="marks">
             ${MARKS.map(([key, text, k]) => `<button class="btn mark ${key} ${it.mark === key ? 'on' : ''}" data-mark="${key}">${text}<kbd>${k}</kbd></button>`).join('')}
-        </div>
+        </div>`}
         <div class="nav">
             <button class="btn" id="prevBtn">← Previous</button>
             <span style="color:#777;font-size:13px">${pos + 1} of ${view.length} in this view</span>
@@ -437,6 +447,7 @@ function wire(it) {
         showRef(it);
     });
     wireNotes(it);
+    if ($('restoreBtn')) $('restoreBtn').onclick = () => restoreItem(it);
     $('prevBtn').onclick = () => go(-1);
     $('nextBtn').onclick = () => go(1);
     if ($('clearBtn')) $('clearBtn').onclick = () => mark(it, null);
@@ -466,14 +477,17 @@ function suggestible(input, suggestion, saved, onAccept) {
 }
 
 function wireNotes(it) {
+    // This card's own elements, grabbed once. Looking them up when saving would read whichever card is on screen
+    // THEN: an autosave fired by moving to the next card (a blur) used to save the next card's boxes onto this one.
+    const noteEl = $('noteInput'), finalEl = $('finalBox'), keepEl = $('keepBox'), moveEl = $('keepMove');
     const save = async () => {
         it.label = lab.value();
-        it.final = $('finalBox').checked;
-        it.note = $('noteInput').value.trim();
-        const keep = $('keepBox').checked;
+        it.final = finalEl.checked;
+        it.note = noteEl.value.trim();
+        const keep = keepEl.checked;
         it.keep_artist = keep ? art.value() : '';
         it.keep_title = keep ? ttl.value() : '';
-        it.keep_move = keep ? $('keepMove').value : '';
+        it.keep_move = keep ? moveEl.value : '';
         await fetch('/api/review/note', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: it.id, label: it.label, note: it.note, keep_artist: it.keep_artist, keep_title: it.keep_title,
                                    keep_move: it.keep_move, final: it.final }) });
@@ -483,6 +497,7 @@ function wireNotes(it) {
     const later = (ms = 600) => { clearTimeout(noteTimer); noteTimer = setTimeout(save, ms); };
 
     const preview = () => {
+        if (view[pos] !== it && !document.body.contains(noteEl)) return;      // this card is no longer on screen
         const label = lab.value();
         $('labelPreview').innerHTML = $('keepBox').checked ? ''
             : label ? `Rekordbox will show: <b>${esc(labeledTitle(it, label))}</b>` + (it.applied_label === label ? ' (already applied)' : '')
@@ -545,7 +560,8 @@ function applyLabels() {
     const moves = keeps.filter(i => i.keep_move);
     showModal(`
         <h3>Apply to Rekordbox?</h3>
-        ${wrongs.length ? `<p><b>${wrongs.length}</b> file(s) marked wrong will be <b>taken out of their playlists</b> and put aside in a <code>_rejected</code> folder (never deleted); the next sync fetches the right ones.</p>` : ''}
+        ${wrongs.length ? `<p><b>${wrongs.length}</b> file(s) marked <b>wrong</b> will be <b>taken out of their playlists</b> and put aside in a <code>_rejected</code> folder (never deleted); the next sync fetches the right ones. Check the list: a different mix you want to keep should be ✓ right with a label, not ✗.</p>
+        <ul>${wrongs.map(i => `<li>${esc(i.title)} <span style="color:#777">— ${esc(i.playlist)}</span></li>`).join('')}</ul>` : ''}
         ${standIns.length ? `<p><b>${standIns.length}</b> labelled mix(es) become <b>stand-ins</b>: they stay in the playlist, and the next sync goes on looking for the mix Spotify actually lists, adding it alongside. (Tick “this mix is the one I want” on a track to stop that.)</p>` : ''}
         ${newLabels.length || keeps.length ? `<p>${newLabels.length ? `<b>${newLabels.length}</b> version label(s) will be added to titles` : ''}${newLabels.length && keeps.length ? ', and ' : ''}${keeps.length ? `<b>${keeps.length}</b> song(s) renamed${moves.length ? `, <b>${moves.length}</b> of them moved to another playlist (file and playlist)` : ''}` : ''}.
            The new titles are also written into the files' tags.</p>` : ''}
@@ -577,6 +593,18 @@ async function runApply() {
             <div class="actions"><button class="btn primary" id="closeApply">OK</button></div>`);
     }
     $('closeApply').onclick = async () => { closeModal(); await load(view[pos]?.id); };
+}
+
+async function restoreItem(it) {
+    const label = $('restoreLabel').value.trim();
+    if (!label) { toast('Name the mix first, so the playlist shows what it is.'); return; }
+    $('restoreBtn').disabled = true;
+    const r = await fetch('/api/review/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                   body: JSON.stringify({ id: it.id, label }) });
+    const d = await r.json();
+    if (!r.ok) { toast(d.detail || 'Could not put it back.'); $('restoreBtn').disabled = false; return; }
+    toast(`Put back: ${d.restored} (${d.playlist})`);
+    await load(it.id);
 }
 
 function go(d) {

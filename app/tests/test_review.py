@@ -41,7 +41,7 @@ class ReviewTest(unittest.TestCase):
         state.write_text(json.dumps({"playlists": {"p": {"variants": {"aiff": {"tracks": {"t1": {
             "file_path": str(self.new_a).replace("\\", "/"), "artist": "Supafly & De Funk", "title": "Pleasure Love"}}}}}}}), encoding="utf-8")
         for name, value in (("AUDIT_FILE", audit), ("MARKS_FILE", self.tmp / "marks.json"), ("CACHE_DIR", self.tmp / "cache"),
-                            ("STATE_FILE", state)):
+                            ("STATE_FILE", state), ("HISTORY_FILE", self.tmp / "history.jsonl")):
             mock.patch.object(review, name, value).start()
         self.addCleanup(mock.patch.stopall)
         self.items = {i["title"]: i for i in review.load_items()}
@@ -263,6 +263,37 @@ class StandInTest(LabelTest):
         self.assertTrue(self.state_record()["stand_in"])
 
 
+class HistoryTest(LabelTest):
+    """Every change to a mark is written down, so a surprising one can be traced."""
+
+    def lines(self):
+        try:
+            return [json.loads(l) for l in review.HISTORY_FILE.read_text(encoding="utf-8").splitlines()]
+        except OSError:
+            return []
+
+    def setUp(self):
+        super().setUp()
+        mock.patch.object(review, "HISTORY_FILE", self.tmp / "history.jsonl").start()
+
+    def test_marking_and_un_marking_are_recorded_with_before_and_after(self):
+        review.review_mark(review.Mark(id=self.pl(), mark="right"))
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        a, b = self.lines()
+        self.assertEqual((a["title"], a["action"], a["before"], a["after"]), ("Pleasure Love", "mark -> right", {}, {"mark": "right"}))
+        self.assertEqual((b["action"], b["before"], b["after"]), ("mark -> wrong", {"mark": "right"}, {"mark": "wrong"}))
+        self.assertTrue(all(l["time"] for l in self.lines()))
+
+    def test_a_label_or_a_kept_song_is_recorded_too_and_a_no_change_is_not(self):
+        review.review_note(review.Note(id=self.pl(), label="Some Mix"))
+        review.review_note(review.Note(id=self.pl(), label="Some Mix"))          # nothing changed
+        review.review_note(review.Note(id=self.pl(), label="Some Mix", keep_title="Other Song"))
+        actions = [l["action"] for l in self.lines()]
+        self.assertEqual(actions, ["note/label/keep saved", "note/label/keep saved"])
+        self.assertEqual(self.lines()[-1]["after"]["mark"], "wrong", "it shows WHAT set the mark to wrong: a kept song")
+        self.assertIn("keep", self.lines()[-1]["after"])
+
+
 class SuggestionTest(unittest.TestCase):
     def test_a_version_label_is_suggested_from_the_file_name(self):
         self.assertEqual(review.suggest_label("05 - I Feel for You (CZR\u2019s Peak Hour vocal mix)", "I Feel for You"),
@@ -482,6 +513,69 @@ class RejectWrongFilesTest(MoveToPlaylistTest):
         with mock.patch("services.rekordbox.set_title_by_path", return_value=True) as set_title:
             self.apply_with()
         set_title.assert_not_called()
+
+
+class RestoreRemovedFileTest(RejectWrongFilesTest):
+    """A file marked wrong and removed can be put back, labelled, if it turns out to be a mix worth keeping."""
+
+    def removed(self):
+        review.review_mark(review.Mark(id=self.pl(), mark="wrong"))
+        self.apply_with()
+        self.aside = self.home / "_rejected" / "a.aiff"
+
+    def restore(self, label="other mix", running=False, update=True):
+        with mock.patch.object(review, "_rekordbox_running", return_value=running), \
+             mock.patch("services.tagging.set_title", return_value=True) as tag, \
+             mock.patch("services.rekordbox.find_playlist_id", return_value="55"), \
+             mock.patch("services.rekordbox.update_content_path", return_value=update) as updated, \
+             mock.patch("services.rekordbox.set_title_by_path", return_value=True) as set_title, \
+             mock.patch("services.rekordbox.find_content_by_path", return_value="content-9"), \
+             mock.patch("services.rekordbox.get_playlist_track_paths", return_value={"a": "1", "b": "2"}), \
+             mock.patch("services.rekordbox.add_track_to_playlist", return_value=True) as added:
+            result = review.review_restore(review.Restore(id=self.pl(), label=label))
+        return result, updated, set_title, added, tag
+
+    def test_a_removed_file_can_still_be_listened_to_and_says_where_it_was_removed_from(self):
+        self.removed()
+        item = {i["title"]: i for i in review.load_items()}["Pleasure Love"]
+        self.assertTrue(item["has_new"], "found in _rejected, so the page can play it")
+        self.assertEqual(item["removed_from"], "beachbar sets (classic) AIFF")
+
+    def test_putting_it_back_moves_the_file_labels_it_and_adds_it_to_the_end_of_its_playlist(self):
+        self.removed()
+        result, updated, set_title, added, tag = self.restore("Andrew Weatherall Mix")
+        back = self.home / "a.aiff"
+        self.assertTrue(back.is_file() and not self.aside.exists())
+        updated.assert_called_once_with(self.aside.as_posix(), back.as_posix())
+        self.assertEqual(set_title.call_args.args[1], "Pleasure Love [Andrew Weatherall Mix]")
+        self.assertEqual(Path(tag.call_args.args[0]), back)
+        added.assert_called_once_with("55", "content-9", 3)
+        self.assertEqual(result, {"restored": "Pleasure Love [Andrew Weatherall Mix]", "playlist": "beachbar sets (classic) AIFF"})
+        entry = self.entry()
+        self.assertEqual((entry["mark"], entry["label"], entry["applied_label"]), ("right", "Andrew Weatherall Mix", "Andrew Weatherall Mix"))
+        self.assertNotIn("rejected", entry)
+
+    def test_it_needs_a_mix_name_and_a_closed_rekordbox_and_a_removed_file(self):
+        self.removed()
+        with self.assertRaises(HTTPException) as ctx:
+            self.restore(label="  ")
+        self.assertEqual(ctx.exception.status_code, 400)
+        with self.assertRaises(HTTPException) as ctx:
+            self.restore(running=True)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertTrue(self.aside.is_file(), "nothing moved")
+
+    def test_if_rekordbox_refuses_the_file_goes_back_to_the_rejected_folder(self):
+        self.removed()
+        with self.assertRaises(HTTPException):
+            self.restore(update=False)
+        self.assertTrue(self.aside.is_file() and not (self.home / "a.aiff").exists())
+        self.assertTrue(self.entry().get("rejected"), "still recorded as removed")
+
+    def test_a_file_that_was_never_removed_cannot_be_restored(self):
+        with self.assertRaises(HTTPException) as ctx:
+            self.restore()
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 if __name__ == "__main__":

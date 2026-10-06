@@ -201,6 +201,7 @@ class SyncFixture(unittest.TestCase):
         mock.patch.object(audit_log, "FILE", self.tmp / "audit.csv").start()
         mock.patch.object(review, "AUDIT_FILE", self.tmp / "audit.csv").start()
         mock.patch.object(review, "MARKS_FILE", self.tmp / "review_marks.json").start()
+        mock.patch.object(review, "HISTORY_FILE", self.tmp / "review_history.jsonl").start()
         mock.patch.object(review, "STATE_FILE", self.tmp / "sync_state.json").start()
         from services import rejected as _rejected
         mock.patch.object(_rejected, "FILE", self.tmp / "rejected_sources.json").start()
@@ -1112,14 +1113,14 @@ class VersionLabelTest(SyncFixture):
         self.assertEqual(with_label("Foo", "A [b]"), "Foo [A (b)]", "brackets inside a label can't break the format")
         self.assertEqual(title_key("Foo (Dub) [x]"), "Foo (Dub)")
 
-    def test_a_labelled_track_already_in_the_playlist_is_not_fetched_again(self):
+    def test_a_labelled_entry_nobody_recorded_is_kept_and_the_real_track_is_still_looked_for(self):
         f = self.tmp / "Library" / "x.flac"
         make_audio(f, "song_a")
         self.rbfake.add_existing_playlist("Deep tech AIFF", {"I Feel For You [CZR's Peak Hour Mix]": str(f).replace("\\", "/")})
         result = self.run_sync()
-        self.assertEqual(self.nico.searches, [], "no search: it is already there under its labelled title")
+        self.assertNotEqual(self.nico.searches, [], "a labelled mix is a stand-in: the Spotify mix is still wanted")
+        self.assertEqual(self.rbfake.removed, [], "and the labelled entry itself is never removed or duplicated")
         self.assertEqual(self.rbfake.imports, [])
-        self.assertEqual(result["tracks_failed"], 0)
 
     def test_a_labelled_entry_in_another_formats_playlist_is_a_stand_in_not_a_source(self):
         flac = self.tmp / "Library" / "x.flac"
@@ -1356,6 +1357,34 @@ class ReviewQueueTest(SyncFixture):
         app_config.set_output_formats(["aiff", "wav"])
         self.run_sync()
         self.assertEqual(len(self.queue()), queued, "the WAV is made from the AIFF's source: nothing new to judge")
+
+
+class LabelledEntryWithoutARecordTest(SyncFixture):
+    """A stand-in put back by hand has no record in sff's state. It must still count as a stand-in."""
+
+    def setUp(self):
+        super().setUp()
+        app_config.set_output_formats(["aiff"])
+        self.spotify_tracks = [spotify_track(0, "id-x", "Real Song", "Somebody", 0)]
+        f = self.tmp / "Library" / "x.flac"
+        make_audio(f, "song_b")
+        self.rbfake.add_existing_playlist("Deep tech AIFF", {"Real Song [other mix]": str(f).replace("\\", "/")})
+
+    def test_it_is_recorded_as_a_stand_in_and_the_real_one_is_searched_for(self):
+        self.nico.offer("Somebody", "Real Song", "song_a", "u1", "m/01 - Real Song.flac", {"4": 44100, "5": 16})
+        self.run_sync()
+        self.assertIn(soulseek._build_query("Somebody", "Real Song"), self.nico.searches)
+        pl = next(p for p in self.rbfake.playlists.values() if p["name"] == "Deep tech AIFF")
+        titles = sorted(self.rbfake.contents[c]["title"] for c in pl["tracks"])
+        self.assertEqual(titles, ["Real Song", "Real Song [other mix]"], "the real mix arrived alongside it")
+
+    def test_a_plain_entry_is_still_just_done(self):
+        f = self.tmp / "Library" / "y.flac"
+        make_audio(f, "song_a")
+        self.rbfake.playlists.clear(); self.rbfake.contents.clear()
+        self.rbfake.add_existing_playlist("Deep tech AIFF", {"Real Song": str(f).replace("\\", "/")})
+        self.run_sync()
+        self.assertEqual(self.nico.searches, [], "a normal entry is left alone, as before")
 
 
 class FlacWithoutAttributesTest(unittest.TestCase):

@@ -26,3 +26,4 @@ review_marks.json
 suspect_downloads_audit.csv
 .review_cache/
 rejected_sources.json
+review_history.jsonl

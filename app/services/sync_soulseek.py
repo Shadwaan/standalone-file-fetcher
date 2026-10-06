@@ -85,6 +85,12 @@ def _inspect_variant(pl_state: dict, fmt: str, base_name: str, tracks: list, cur
                 "filename": Path(path).name if path else "", "file_path": path,
                 "artist": t.artist, "title": t.title,
             }
+            # "Title [mix name]" and no plain "Title": a different mix standing in for the real one, so the
+            # real one is still wanted (a stand-in put back by hand has no record in the state)
+            if t.title not in raw_titles:
+                v["tracks"][t.spotify_id]["stand_in"] = True
+                v["tracks"][t.spotify_id]["stand_in_label"] = next(
+                    (rt[len(title_key(rt)):].strip(" []") for rt in raw_titles if title_key(rt) == title_key(t.title)), "")
 
     # A STAND-IN is a different mix kept (and labelled) in place of the one Spotify lists. It holds the
     # place, but the track is not done: it keeps being searched for, until a file carrying the plain
