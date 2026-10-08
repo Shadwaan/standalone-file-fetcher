@@ -9,6 +9,7 @@ different mix but kept on purpose; "Apply labels" writes it into the title in Re
 Nothing else here changes your library.
 """
 import csv
+import glob
 import hashlib
 from datetime import datetime
 import json
@@ -164,6 +165,16 @@ def _where_now(new_file: str, entry: dict) -> Path:
         candidate = path.parent / "_rejected" / path.name
         if candidate.is_file():
             return candidate
+    if not path.is_file():                           # a kept song moved to another playlist's folder
+        recorded = entry.get("moved_path")
+        if recorded and Path(recorded).is_file():
+            return Path(recorded)
+        target = (entry.get("applied_keep") or entry.get("keep") or {}).get("move_to")
+        if target:
+            folder = _music_folder() / target
+            for candidate in [folder / path.name, *sorted(folder.glob(glob.escape(path.stem) + "*" + path.suffix))]:
+                if candidate.is_file():
+                    return candidate
     return path
 
 
@@ -612,6 +623,8 @@ def review_apply_labels():
                     moved_to = ""
                     if keep.get("move_to"):
                         moved_to = _move_to_playlist(path, keep["move_to"]) or ""
+                        if moved_to:
+                            entry["moved_path"] = moved_to
                         if not moved_to:
                             failed.append(item["title"] + " (renamed, but could not be moved to " + keep["move_to"] + ")")
                     _detach_from_spotify_track(path)

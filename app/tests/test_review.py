@@ -458,6 +458,20 @@ class MoveToPlaylistTest(ReviewTest):
         self.assertEqual(state["playlists"]["q"]["variants"]["aiff"]["tracks"], {}, "NOT recorded against the target's Spotify list")
         self.assertEqual(state["playlists"]["p"]["variants"]["aiff"]["tracks"], {}, "and no longer tied to the Spotify track")
 
+    def test_a_moved_song_can_still_be_listened_to_on_the_review_page(self):
+        review.review_note(review.Note(id=self.pl(), keep_artist="Saint Etienne", keep_title="Only Love Can Break Your Heart",
+                                       keep_move="Dub Reggae Bass Addict AIFF"))
+        self.apply()
+        item = {i["title"]: i for i in review.load_items()}["Pleasure Love"]
+        self.assertTrue(item["has_new"], "found in the folder it was moved to, not just where it used to be")
+        self.assertEqual(review._paths(self.pl())[0], self.music / "Dub Reggae Bass Addict AIFF" / "a.aiff")
+
+    def test_a_moved_song_is_found_even_when_the_move_was_made_before_its_path_was_recorded(self):
+        review.review_note(review.Note(id=self.pl(), keep_title="Only Love", keep_move="Dub Reggae Bass Addict AIFF"))
+        self.apply()
+        marks = review.load_marks(); marks[self.pl()].pop("moved_path", None); review._save_marks(marks)
+        self.assertEqual(review._paths(self.pl())[0], self.music / "Dub Reggae Bass Addict AIFF" / "a.aiff")
+
     def test_if_rekordbox_refuses_the_new_path_the_file_goes_back_where_it_was(self):
         review.review_note(review.Note(id=self.pl(), keep_title="Only Love", keep_move="Dub Reggae Bass Addict AIFF"))
         result, rb = self.apply(update=False)
