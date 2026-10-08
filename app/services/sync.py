@@ -629,6 +629,11 @@ class SyncOrchestrator:
             self.progress.message = f"Waiting for Rekordbox to close ({reason})..."
             time.sleep(5)
 
-    def _do_sync_soulseek(self) -> dict:
+    def run_setlists(self, folder: str) -> dict:
+        """Sync the .txt track lists in a folder (e.g. SoundCloud set lists) through the Soulseek pipeline."""
+        from services.setlists import SetlistSource
+        return self._run(lambda: self._do_sync_soulseek(SetlistSource(folder)), full_sync=False)
+
+    def _do_sync_soulseek(self, source=None) -> dict:
         from services.sync_soulseek import run_soulseek_sync
-        return run_soulseek_sync(self)
+        return run_soulseek_sync(self, source)

@@ -177,7 +177,33 @@ def _references(needed, track_by_id, library) -> dict[str, Path]:
     return out
 
 
-def _make_validator(references: dict[str, Path], findings: dict | None = None):
+SAME_AS_REJECTED_AT = 0.97          # this alike to a file you rejected: it IS that file (or an exact copy of it)
+
+
+def _rejected_files(track_by_id, ids) -> dict[str, list[Path]]:
+    """For each wanted track, the files you already marked wrong for the same song (kept in _rejected),
+    so a later download of the same wrong file -- from anyone -- is recognised by its sound and turned down."""
+    try:
+        import review
+        marks, items = review.load_marks(), review.load_items()
+        by_title: dict[str, list[Path]] = {}
+        for item in items:
+            if (marks.get(item["id"]) or {}).get("rejected"):
+                path = review._paths(item["id"])[0]
+                if path and path.is_file():
+                    by_title.setdefault(title_key(item["title"]).strip().lower(), []).append(path)
+    except Exception as e:                       # the guard must never stop a sync
+        logger.warning("Could not read the files you rejected: %s", e)
+        return {}
+    out = {}
+    for sid in ids:
+        files = by_title.get(title_key(track_by_id[sid].title).strip().lower())
+        if files:
+            out[sid] = files
+    return out
+
+
+def _make_validator(references: dict[str, Path], findings: dict | None = None, rejected: dict | None = None):
     """The "is this finished download any good?" gate resolve_all applies to every file that arrives.
     Returns True, or a short reason it was turned down (and another source is tried)."""
     def validate(path: Path, track):
@@ -193,6 +219,12 @@ def _make_validator(references: dict[str, Path], findings: dict | None = None):
         if not soulseek.has_stem_marker(track.title) and verify_audio.looks_like_stem(path):
             logger.info("rejected %s: it has almost no bass, so it is a vocals-only stem", path.name)
             return "a vocals-only stem"
+
+        for bad in (rejected or {}).get(track.spotify_id, []):
+            alike = verify_audio.compare(path, bad)
+            if alike is not None and alike >= SAME_AS_REJECTED_AT:
+                logger.info("rejected %s: it is the same recording as %s, which you marked wrong (%.2f)", path.name, bad.name, alike)
+                return "the same file you already rejected for this track"
 
         reference = references.get(track.spotify_id)
         if reference and reference != path:
@@ -210,8 +242,9 @@ def _make_validator(references: dict[str, Path], findings: dict | None = None):
     return validate
 
 
-def run_soulseek_sync(orch) -> dict:
-    """Run the Soulseek sync on a SyncOrchestrator (it owns state and progress)."""
+def run_soulseek_sync(orch, source=None) -> dict:
+    """Run the Soulseek sync on a SyncOrchestrator (it owns state and progress). The playlists come from
+    Spotify unless a `source` (anything with get_prefixed_playlists / get_playlist_tracks) is given."""
     if orch._refuse_if_rekordbox_running():
         return orch.get_progress()
 
@@ -242,10 +275,10 @@ def run_soulseek_sync(orch) -> dict:
     nicotine_dir = os.getenv("NICOTINE_DOWNLOAD_DIR", r"D:\Music\Nicotine")
 
     progress.phase = "discovering"
-    progress.message = "Connecting to Spotify..."
+    progress.message = "Reading the track lists..." if source else "Connecting to Spotify..."
     logger.info("=== Soulseek sync started (formats: %s) ===", ", ".join(formats))
 
-    spotify = SpotifyService()
+    spotify = source or SpotifyService()
     playlists = spotify.get_prefixed_playlists()
     progress.playlists_found = len(playlists)
 
@@ -355,7 +388,8 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
 
         references = _references(needed, track_by_id, library)
         soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir,
-                             validate=_make_validator(references, findings),
+                             validate=_make_validator(references, findings,
+                                                      _rejected_files(track_by_id, [t.spotify_id for t in to_download])),
                              on_notice=_notice)
 
     # 3. FILE WORK

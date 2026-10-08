@@ -1,6 +1,7 @@
 """Moving the library to another computer: the manifest and its importer."""
 import json
 import sys
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,6 +79,12 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual((kept["spotify_id"], kept["artist"]), (None, "Somebody Else"), "a kept song is not tied to Spotify")
         self.assertEqual(a["path"], "Dub AIFF/a.aiff", "relative to the music folder, so it works anywhere")
 
+    def test_a_file_set_aside_as_wrong_is_not_part_of_the_library(self):
+        self.rb.playlists["Dub AIFF"].append(entry("Wrong Song", f"{self.root}/Dub AIFF/_rejected/wrong.aiff"))
+        titles = [t["title"] for t in self.build()["playlists"][0]["tracks"]]
+        self.assertNotIn("Wrong Song", titles)
+        self.assertIn("A", titles)
+
     def test_a_file_outside_the_music_folder_is_reported_not_silently_lost(self):
         m = self.build()
         self.assertEqual([o["title"] for o in m["not_exported_outside_music_root"]], ["Old YouTube MP3"])
@@ -90,6 +97,7 @@ class ManifestTest(unittest.TestCase):
 class ImportTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.mac_root = self.tmp / "Volumes" / "SSD" / "Music" / "Incoming"
         (self.mac_root / "Dub AIFF").mkdir(parents=True)
         for name in ("a.aiff", "b.aiff", "kept.aiff"):

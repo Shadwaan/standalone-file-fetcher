@@ -680,6 +680,14 @@ $('filter').onchange = () => { stopAll(); pos = 0; applyFilter(); };
 $('undoBtn').onclick = undo;
 $('applyBtn').onclick = applyLabels;
 $('modalBg').addEventListener('click', e => { if (e.target === $('modalBg') && $('cancelApply')) closeModal(); });
+// Tells the server "the browser is still here". Without it, opening this page from the main one stops the main
+// page's heartbeat and a start.bat launch shuts itself down ~20s later.
+(function heartbeat() {
+    const ping = () => fetch('/api/heartbeat', { method: 'POST', keepalive: true }).catch(() => {});
+    ping();
+    setInterval(ping, 5000);
+})();
+
 load();
 </script>
 </body>

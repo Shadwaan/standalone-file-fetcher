@@ -93,6 +93,24 @@ async def start_sync():
     return {"status": "started", "message": "Sync started"}
 
 
+class SetlistRequest(BaseModel):
+    folder: str
+
+
+@app.post("/api/setlists/sync")
+async def sync_setlists(body: SetlistRequest):
+    """Sync a folder of .txt track lists (one playlist per file) through the Soulseek pipeline (background)."""
+    global _sync_task
+    orchestrator = _get_orchestrator()
+    if orchestrator.progress.status == "running":
+        return JSONResponse({"error": "Sync already in progress"}, status_code=409)
+    if not list(Path(body.folder).glob("*.txt")):
+        return JSONResponse({"error": f"No .txt track lists in {body.folder}"}, status_code=400)
+    loop = asyncio.get_event_loop()
+    _sync_task = loop.run_in_executor(None, orchestrator.run_setlists, body.folder)
+    return {"status": "started", "message": "Syncing track lists"}
+
+
 @app.post("/api/retry-failed")
 async def retry_failed():
     """Re-attempt only the downloads that failed in earlier syncs (background)."""

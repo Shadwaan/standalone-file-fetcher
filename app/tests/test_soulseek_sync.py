@@ -10,6 +10,7 @@ import json
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -188,6 +189,7 @@ class SyncFixture(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.music, self.nic = self.tmp / "Incoming", self.tmp / "Nicotine"
         self.music.mkdir(); self.nic.mkdir()
         self.events: list[tuple] = []
@@ -865,6 +867,7 @@ class HourlyPeerLimitTest(SyncFixture):
 class UploaderReportTest(unittest.TestCase):
     def test_summary_groups_uploaders_per_playlist_and_counts_each_track_once(self):
         tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         with mock.patch.object(source_log, "FILE", tmp / "download_sources.csv"):
             def row(playlist, title, user, path="share/Dub Album/01 - x.flac", how="downloaded"):
                 return {"playlist": playlist, "artist": "A", "title": title, "from_user": user, "remote_path": path, "how": how}
@@ -1027,6 +1030,7 @@ class StemMarkerNamesTest(unittest.TestCase):
 class VerifyAudioTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         for kind in ("song_a", "song_b", "song_a_nobass", "song_a_mp3"):
             make_audio(self.tmp / f"{kind}.{'mp3' if kind.endswith('mp3') else 'flac'}", kind)
 
@@ -1110,7 +1114,11 @@ class VersionLabelTest(SyncFixture):
         self.assertEqual(strip_label("I Feel For You [CZR's Peak Hour Mix]"), "I Feel For You")
         self.assertEqual(with_label("I Feel For You [Old]", "CZR's Peak Hour Mix"), "I Feel For You [CZR's Peak Hour Mix]")
         self.assertEqual(with_label("I Feel For You", ""), "I Feel For You")
-        self.assertEqual(with_label("Foo", "A [b]"), "Foo [A (b)]", "brackets inside a label can't break the format")
+        self.assertEqual(with_label("Foo", "A (b)"), "Foo [A (b)]")
+        self.assertEqual(with_label("Foo", "A [b]"), "Foo [b]", "a [bracketed] part IS the label; the rest is the version it was downloaded as")
+        self.assertEqual(with_label("Back & Forth", "Back & Forth (Original Mix) [Hot Creations]"), "Back & Forth [Hot Creations]")
+        self.assertEqual(with_label("Foo", "Intro [x] Mix [Real Mix]"), "Foo [Real Mix]", "the last bracketed part wins")
+        self.assertEqual(with_label("Foo", "[Hot Creations]"), "Foo [Hot Creations]")
         self.assertEqual(title_key("Foo (Dub) [x]"), "Foo (Dub)")
 
     def test_a_labelled_entry_nobody_recorded_is_kept_and_the_real_track_is_still_looked_for(self):
@@ -1387,6 +1395,49 @@ class LabelledEntryWithoutARecordTest(SyncFixture):
         self.assertEqual(self.nico.searches, [], "a normal entry is left alone, as before")
 
 
+class RejectedFileGuardTest(SyncFixture):
+    """A file you marked wrong must not come back from another uploader."""
+
+    def setUp(self):
+        super().setUp()
+        self.track = spotify_track(0, "id-heaven", "Heaven", "The Vision", 0)
+        self.bad = self.tmp / "Library" / "_rejected" / "Heaven.flac"
+        make_audio(self.bad, "song_a")
+
+    def validator(self, rejected=True):
+        from services.sync_soulseek import _make_validator
+        return _make_validator({}, {}, {"id-heaven": [self.bad]} if rejected else None)
+
+    def test_the_same_recording_from_someone_else_is_turned_down(self):
+        again = self.tmp / "dl" / "Vision of Heaven.flac"
+        make_audio(again, "song_a")
+        self.assertEqual(self.validator()(again, self.track), "the same file you already rejected for this track")
+
+    def test_a_different_recording_is_accepted(self):
+        other = self.tmp / "dl" / "Heaven.flac"
+        make_audio(other, "song_b")
+        self.assertIs(self.validator()(other, self.track), True)
+
+    def test_with_nothing_rejected_the_same_recording_is_fine(self):
+        again = self.tmp / "dl" / "Vision of Heaven.flac"
+        make_audio(again, "song_a")
+        self.assertIs(self.validator(rejected=False)(again, self.track), True)
+
+    def test_the_rejected_files_are_found_by_track_title_from_the_review_marks(self):
+        from services import sync_soulseek
+        import review
+        with mock.patch.object(review, "load_marks", return_value={"i1": {"rejected": True}, "i2": {"mark": "right"}}),              mock.patch.object(review, "load_items", return_value=[{"id": "i1", "title": "Heaven"}, {"id": "i2", "title": "Other"}]),              mock.patch.object(review, "_paths", return_value=(self.bad, None)):
+            found = sync_soulseek._rejected_files({"id-heaven": self.track, "id-x": spotify_track(0, "id-x", "Other", "A", 1)},
+                                                  ["id-heaven", "id-x"])
+        self.assertEqual(found, {"id-heaven": [self.bad]}, "only the rejected one, for the track with that title")
+
+    def test_a_problem_reading_the_marks_never_stops_the_sync(self):
+        from services import sync_soulseek
+        import review
+        with mock.patch.object(review, "load_marks", side_effect=ValueError("broken")):
+            self.assertEqual(sync_soulseek._rejected_files({"id-heaven": self.track}, ["id-heaven"]), {})
+
+
 class FlacWithoutAttributesTest(unittest.TestCase):
     """A real '16BIT-WEB-FLAC' release came back with no bit depth and was rejected."""
 
@@ -1610,7 +1661,9 @@ class MatcherTest(unittest.TestCase):
 
     def test_fallback_search_finds_the_two_word_spelling(self):
         events = []
-        nico = FakeNicotine(Path(tempfile.mkdtemp()), events)
+        _nic = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, _nic, ignore_errors=True)
+        nico = FakeNicotine(_nic, events)
         nico.catalog[soulseek._fallback_query("Modjo", "Rollercoaster")] = [{
             "username": "u1", "file_path": r"m\Modjo - Roller Coaster.wav", "size": 1000, "file_attributes": {},
             "free_upload_slots": True, "upload_speed": 1000, "_kind": "wav16"}]

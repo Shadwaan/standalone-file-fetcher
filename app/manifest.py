@@ -63,6 +63,8 @@ def build_manifest(state: dict, music_root: str, rb) -> dict:
                 if rel is None:
                     outside.append((v.get("display_name"), entry["title"], entry["path"]))
                     continue
+                if "/_rejected/" in "/" + rel:
+                    continue                  # a file marked wrong and set aside: not part of the library
                 sid, rec = by_path.get(_posix(entry["path"]).lower(), (None, {}))
                 tracks.append({
                     "position": len(tracks) + 1, "title": entry["title"], "artist": entry["artist"], "album": entry["album"],

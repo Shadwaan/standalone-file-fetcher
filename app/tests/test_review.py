@@ -3,6 +3,7 @@ import csv
 import json
 import subprocess
 import sys
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,7 @@ import review  # noqa: E402
 class ReviewTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.new_a, self.old_a = self.tmp / "new" / "a.aiff", self.tmp / "old" / "a.mp3"
         self.new_b = self.tmp / "new" / "b.aiff"
         self.new_a.parent.mkdir(parents=True)
@@ -292,6 +294,24 @@ class HistoryTest(LabelTest):
         self.assertEqual(actions, ["note/label/keep saved", "note/label/keep saved"])
         self.assertEqual(self.lines()[-1]["after"]["mark"], "wrong", "it shows WHAT set the mark to wrong: a kept song")
         self.assertIn("keep", self.lines()[-1]["after"])
+
+
+class BracketedLabelTest(LabelTest):
+    """What is in [] is the label; the text around it is the version the file was downloaded as."""
+
+    def test_the_label_is_saved_and_applied_as_the_bracketed_part(self):
+        review.review_note(review.Note(id=self.pl(), label="Pleasure Love (Original Mix) [Hot Creations]"))
+        self.assertEqual(self.entry()["label"], "Hot Creations")
+
+    def test_a_label_saved_the_old_way_is_cleaned_when_applied(self):
+        review.review_note(review.Note(id=self.pl(), label="x"))
+        marks = review.load_marks(); marks[self.pl()]["label"] = "Pleasure Love (Original Mix) [Hot Creations]"
+        review._save_marks(marks)
+        with mock.patch.object(review, "_rekordbox_running", return_value=False),              mock.patch("services.rekordbox.set_title_by_path", return_value=True) as set_title,              mock.patch("services.tagging.set_title", return_value=True):
+            review.review_apply_labels()
+        self.assertEqual(set_title.call_args.args[1], "Pleasure Love [Hot Creations]")
+        self.assertEqual(self.entry()["label"], "Hot Creations")
+        self.assertEqual(self.entry()["applied_label"], "Hot Creations")
 
 
 class SuggestionTest(unittest.TestCase):

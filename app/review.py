@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from services.labels import with_label
+from services.labels import clean_label, with_label
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +336,7 @@ def review_note(body: Note):
         marks = load_marks()
         entry = marks.get(body.id, {})
         before = json.loads(json.dumps(entry))
-        for key, value in (("label", " ".join(body.label.split())), ("note", body.note.strip())):
+        for key, value in (("label", clean_label(body.label)), ("note", body.note.strip())):
             if value:
                 entry[key] = value
             else:
@@ -551,7 +551,7 @@ def review_restore(body: Restore):
     from services import tagging
     from services.audio_formats import unique_path
     import shutil
-    label = " ".join(body.label.split())
+    label = clean_label(body.label)
     if not label:
         raise HTTPException(status_code=400, detail="Give the mix a name, so the playlist shows what it is.")
     with _lock:
@@ -634,7 +634,9 @@ def review_apply_labels():
                 else:
                     failed.append(item["title"] + " (could not be removed)")
                 continue
-            label, done = entry.get("label", ""), entry.get("applied_label", "")
+            label, done = clean_label(entry.get("label", "")), entry.get("applied_label", "")
+            if label != entry.get("label", ""):
+                entry["label"] = label                      # stored the way it will be shown
             if label != done:
                 title = with_label(item["title"], label)
                 if rb.set_title_by_path(path.as_posix(), title):
