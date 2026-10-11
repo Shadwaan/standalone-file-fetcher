@@ -41,3 +41,17 @@ def with_label(title: str, label: str) -> str:
 def title_key(title: str) -> str:
     """What titles are compared by."""
     return strip_label(title)
+
+
+_FEAT = re.compile(r"[\(\[]\s*(?:feat\.?|ft\.?|featuring)\b[^\)\]]*[\)\]]|\b(?:feat\.?|ft\.?|featuring)\b.*$", re.I)
+
+
+def norm_title(title: str) -> str:
+    """A title for comparing with files that spell it a little differently: [Dub] and (Dub) are the same, a
+    "(feat. X)" credit is ignored, case and punctuation do not matter. The VERSION words stay, so
+    "Oh Mama (Dub)" is still not "Oh Mama"."""
+    t = _FEAT.sub(" ", title or "")
+    t = re.sub(r"['\u2019`]", "", t)                      # don't -> dont, not "don t"
+    t = t.replace("[", " ").replace("]", " ").replace("(", " ").replace(")", " ")
+    t = re.sub(r"[^\w\s]", " ", t.lower())
+    return " ".join(t.split())

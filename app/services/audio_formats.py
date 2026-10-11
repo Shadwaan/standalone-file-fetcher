@@ -133,6 +133,33 @@ def _unique(folder: Path, stem: str, fmt: str) -> Path:
     return unique_path(folder, stem, FORMATS[fmt].ext)
 
 
+SAME_RECORDING_AT = 0.985          # alike to this degree = the same recording, not just the same song
+
+
+def same_recording(a: Path, b: Path) -> bool:
+    """True when two files are the same recording (the same audio, whatever the format or tags)."""
+    try:
+        from services import verify_audio
+        alike = verify_audio.compare(a, b)
+    except Exception:
+        return False
+    return alike is not None and alike >= SAME_RECORDING_AT
+
+
+def dest_or_existing(folder: Path, stem: str, ext: str, src: Path) -> tuple[Path, bool]:
+    """Where `src` should be saved in `folder`. When that name is taken the new file used to become `stem_1.ext`,
+    a second copy of the same song. Now every file already called `stem.ext` / `stem_1.ext`... is compared by sound
+    first: if one IS the same recording it is reused (True) and nothing is written; `_1` only for audio that differs."""
+    candidate, n = folder / f"{stem}.{ext}", 0
+    while candidate.exists():
+        if same_recording(src, candidate):
+            logger.info("%s is already in %s as %s: reusing it instead of saving a second copy", src.name, folder.name, candidate.name)
+            return candidate, True
+        n += 1
+        candidate = folder / f"{stem}_{n}.{ext}"
+    return candidate, False
+
+
 def build_outputs(
     src: Path,
     formats: list[str],
@@ -160,9 +187,12 @@ def build_outputs(
             if is_ready(src, fmt):
                 dest_dir = dest_dir_for(fmt)
                 dest_dir.mkdir(parents=True, exist_ok=True)
-                dest = _unique(dest_dir, src.stem, fmt)
-                shutil.move(str(src), str(dest))
-                outputs[fmt], base = dest, dest
+                dest, reuse = dest_or_existing(dest_dir, src.stem, FORMATS[fmt].ext, src)
+                if reuse:
+                    outputs[fmt] = dest              # src stays as base (it is archived below), nothing new is written
+                else:
+                    shutil.move(str(src), str(dest))
+                    outputs[fmt], base = dest, dest
                 break
 
     for fmt in formats:
@@ -170,8 +200,10 @@ def build_outputs(
             continue
         dest_dir = dest_dir_for(fmt)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = _unique(dest_dir, src.stem, fmt)
-        if convert(base, dest, fmt):
+        dest, reuse = dest_or_existing(dest_dir, src.stem, FORMATS[fmt].ext, base)
+        if reuse:
+            outputs[fmt] = dest
+        elif convert(base, dest, fmt):
             outputs[fmt] = dest
 
     if not keep_source and base == src and outputs and src.exists():

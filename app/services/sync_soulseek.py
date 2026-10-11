@@ -27,7 +27,7 @@ from pathlib import Path
 
 from services import app_config, audio_formats, audit_log, failure_log, soulseek, source_log, tagging, verify_audio
 from services.suggest import suggest_label
-from services.labels import title_key
+from services.labels import norm_title, title_key
 from services import rekordbox as rb
 
 logger = logging.getLogger(__name__)
@@ -142,12 +142,11 @@ def _existing_sources(playlists_state: dict, track, library: list[tuple[str, str
     for path_str in siblings.get(title_key(track.title), []):
         consider(path_str)
 
-    title = track.title.strip().lower()
-    first_artist = track.artist.split(",")[0].strip().lower()
-    exact_stem = f"{track.artist} - {track.title}".lower()
+    title = norm_title(track.title)
+    first_artist = norm_title(track.artist.split(",")[0])
+    exact_stem = norm_title(f"{track.artist} - {track.title}")
     for lib_title, lib_path in library:
-        stem = Path(lib_path).stem.lower()
-        if stem == exact_stem or (lib_title.strip().lower() == title and first_artist in lib_path.lower()):
+        if norm_title(Path(lib_path).stem) == exact_stem or (norm_title(lib_title) == title and first_artist in norm_title(lib_path)):
             consider(lib_path)
 
     found.sort(key=lambda p: soulseek.FORMAT_TIER.get(p.suffix.lower(), 0), reverse=True)
@@ -163,17 +162,29 @@ def _references(needed, track_by_id, library) -> dict[str, Path]:
     out = {}
     for sid in needed:
         track = track_by_id[sid]
-        title = track.title.strip().lower()
-        first_artist = track.artist.split(",")[0].strip().lower()
-        exact_stem = f"{track.artist} - {track.title}".lower()
+        title = norm_title(track.title)
+        first_artist = norm_title(track.artist.split(",")[0])
+        exact_stem = norm_title(f"{track.artist} - {track.title}")
         for lib_title, lib_path in library:
             path = Path(lib_path)
             if path.suffix.lower() not in _AUDIO_EXTS:
                 continue
-            if (path.stem.lower() == exact_stem or (lib_title.strip().lower() == title and first_artist in lib_path.lower())) \
+            if (norm_title(path.stem) == exact_stem or (norm_title(lib_title) == title and first_artist in norm_title(lib_path))) \
                     and path.is_file():
                 out[sid] = path
                 break
+    return out
+
+
+def _held_files(playlists_state: dict, ids) -> dict[str, list[Path]]:
+    """For each wanted track, the stand-in files sff already holds for it (a different mix that keeps its place).
+    A download that turns out to be the very same recording is a duplicate, not the real mix."""
+    wanted, out = set(ids), {}
+    for pl in playlists_state.values():
+        for v in (pl.get("variants") or {}).values():
+            for sid, rec in (v.get("tracks") or {}).items():
+                if sid in wanted and rec.get("stand_in") and rec.get("file_path") and Path(rec["file_path"]).is_file():
+                    out.setdefault(sid, []).append(Path(rec["file_path"]))
     return out
 
 
@@ -203,7 +214,8 @@ def _rejected_files(track_by_id, ids) -> dict[str, list[Path]]:
     return out
 
 
-def _make_validator(references: dict[str, Path], findings: dict | None = None, rejected: dict | None = None):
+def _make_validator(references: dict[str, Path], findings: dict | None = None, rejected: dict | None = None,
+                    held: dict | None = None):
     """The "is this finished download any good?" gate resolve_all applies to every file that arrives.
     Returns True, or a short reason it was turned down (and another source is tried)."""
     def validate(path: Path, track):
@@ -219,6 +231,11 @@ def _make_validator(references: dict[str, Path], findings: dict | None = None, r
         if not soulseek.has_stem_marker(track.title) and verify_audio.looks_like_stem(path):
             logger.info("rejected %s: it has almost no bass, so it is a vocals-only stem", path.name)
             return "a vocals-only stem"
+
+        for have in (held or {}).get(track.spotify_id, []):
+            if have != path and audio_formats.same_recording(path, have):
+                logger.info("rejected %s: it is the same recording as %s, which you already have for this track", path.name, have.name)
+                return "the same recording you already have for this track"
 
         for bad in (rejected or {}).get(track.spotify_id, []):
             alike = verify_audio.compare(path, bad)
@@ -286,6 +303,7 @@ def run_soulseek_sync(orch, source=None) -> dict:
         for pl in playlists:
             _sync_playlist(orch, spotify, pl, formats, music_folder, nicotine_dir)
 
+        _report_duplicates(progress, music_folder, playlists)
         progress.status = "done"
         progress.phase = "complete"
         labels = "/".join(audio_formats.FORMATS[f].label for f in formats)
@@ -298,6 +316,38 @@ def run_soulseek_sync(orch, source=None) -> dict:
     finally:
         orch._save_state()
     return orch.get_progress()
+
+
+def find_suffix_duplicates(folder: Path) -> list[tuple[Path, Path]]:
+    """Pairs (original, copy) in one folder where the copy is the original's name + _1/_2... and sounds identical."""
+    pairs = []
+    files = {p.name.lower(): p for p in folder.iterdir() if p.is_file() and not p.name.startswith("._")} if folder.is_dir() else {}
+    for low, p in files.items():
+        stem = p.stem
+        if "_" not in stem or not stem.rsplit("_", 1)[1].isdigit():
+            continue
+        base = files.get(f"{stem.rsplit('_', 1)[0]}{p.suffix}".lower())
+        if base and audio_formats.same_recording(p, base):
+            pairs.append((base, p))
+    return pairs
+
+
+def _report_duplicates(progress, music_folder: str, playlists) -> None:
+    """After a sync: say so if any playlist folder holds the same recording twice, so it can be looked at."""
+    try:
+        seen = set()
+        for pl in playlists:
+            for fmt in audio_formats.FORMATS.values():
+                folder = Path(music_folder) / f"{pl['display_name']} {fmt.label}"
+                if folder in seen:
+                    continue
+                seen.add(folder)
+                for original, copy in find_suffix_duplicates(folder):
+                    msg = f"Possible duplicate: {copy.name} sounds identical to {original.name} ({folder.name})"
+                    logger.warning(msg)
+                    progress.errors.append(msg)
+    except Exception as e:                       # a report must never fail a sync
+        logger.warning("Duplicate check skipped: %s", e)
 
 
 def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: str, nicotine_dir: str) -> None:
@@ -389,7 +439,8 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
         references = _references(needed, track_by_id, library)
         soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir,
                              validate=_make_validator(references, findings,
-                                                      _rejected_files(track_by_id, [t.spotify_id for t in to_download])),
+                                                      _rejected_files(track_by_id, [t.spotify_id for t in to_download]),
+                                                      _held_files(orch._state["playlists"], [t.spotify_id for t in to_download])),
                              on_notice=_notice)
 
     # 3. FILE WORK
@@ -443,13 +494,14 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
             dest_dir.mkdir(parents=True, exist_ok=True)
             carry = tagging.read_carry_over_tags(src)
             art = tagging.fetch_artwork(track.artwork_url) or tagging.embedded_picture(src)
-            dest = audio_formats.unique_path(dest_dir, src.stem, "mp3")
-            if keep_source:
-                shutil.copy2(src, dest)
-            else:
-                shutil.move(str(src), str(dest))
-            if not tagging.write_tags(dest, track, art, carry):
-                progress.errors.append(f"Could not write tags/cover for {label} (mp3); file kept as is")
+            dest, reuse = audio_formats.dest_or_existing(dest_dir, src.stem, "mp3", src)
+            if not reuse:                               # the same recording already there: keep that one, write nothing
+                if keep_source:
+                    shutil.copy2(src, dest)
+                else:
+                    shutil.move(str(src), str(dest))
+                if not tagging.write_tags(dest, track, art, carry):
+                    progress.errors.append(f"Could not write tags/cover for {label} (mp3); file kept as is")
             for fmt in fmts:
                 planned.append((sid, fmt, dest))
             logger.info("kept %s as a 320 kbps MP3 (the lossless fallback): %s", label, dest.name)

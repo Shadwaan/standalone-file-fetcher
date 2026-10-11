@@ -319,6 +319,20 @@ _GENERIC_QUALIFIER_WORDS = {"dub", "instrumental", "extended", "radio", "origina
                             "remix", "mix", "edit", "dubstrumental", "and", "with", "feat", "featuring"}
 
 
+_CREDITED_VERSION = re.compile(r"[\(\[]\s*([^()\[\]]*?)\s*\b(?:radio|extended|club|original|dub)?\s*(?:edit|remix|mix|rework|bootleg|vip)\s*[\)\]]")
+
+
+def _names_someone_elses_version(filename: str, title_full: str) -> bool:
+    """"(Hardwell Radio Edit)" is a version somebody made. When the title asked only for a KIND of version
+    ("Radio Edit"), a file credited to a named person is a different thing, not the plain one."""
+    title_words = set(re.findall(r"[a-z0-9]+", title_full.lower()))
+    for m in _CREDITED_VERSION.finditer(filename):
+        names = [w for w in re.findall(r"[a-z0-9]+", m.group(1)) if w not in _GENERIC_QUALIFIER_WORDS and len(w) > 1]
+        if names and not all(n in title_words for n in names):
+            return True
+    return False
+
+
 def _qualifier_tokens(qualifier: str | None) -> list[str]:
     if not qualifier:
         return []
@@ -378,7 +392,7 @@ def passes_version_guard(file_path_lower: str, title_full: str) -> bool:
     distinctive = [t for t in q_tokens if t not in _GENERIC_QUALIFIER_WORDS]
     if distinctive:
         return all(tok in file_path_lower for tok in distinctive)
-    return any(tok in file_path_lower for tok in q_tokens)
+    return any(tok in file_path_lower for tok in q_tokens) and not _names_someone_elses_version(filename, title_full)
 
 
 def _query_title(title_main: str) -> str:
