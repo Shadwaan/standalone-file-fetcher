@@ -150,5 +150,21 @@ class NamedEditTest(unittest.TestCase):
         self.assertTrue(self.ok("x/Man With The Red Face (Original Radio Edit).flac"))
 
 
+class MergeCommentTest(unittest.TestCase):
+    def test_a_comment_is_added_after_what_is_already_there(self):
+        from services.rekordbox import merge_comment
+        self.assertEqual(merge_comment("", "Bangkok Groove"), "Bangkok Groove")
+        self.assertEqual(merge_comment("rip: vinyl", "Bangkok Groove"), "rip: vinyl | Bangkok Groove")
+
+    def test_the_same_comment_is_not_added_twice(self):
+        from services.rekordbox import merge_comment
+        self.assertEqual(merge_comment("Bangkok Groove", "bangkok groove"), "Bangkok Groove")
+
+    def test_an_empty_comment_changes_nothing(self):
+        from services.rekordbox import merge_comment
+        self.assertEqual(merge_comment("keep me", ""), "keep me")
+        self.assertEqual(merge_comment(None, None), "")
+
+
 if __name__ == "__main__":
     unittest.main()

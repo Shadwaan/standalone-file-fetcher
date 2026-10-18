@@ -943,7 +943,7 @@ def get_playlist_entries(playlist_id: str) -> list[dict]:
             album = db.session.query(tables.DjmdAlbum).filter_by(ID=c.AlbumID).first() if c.AlbumID else None
             out.append({"title": c.Title or "", "path": c.FolderPath or "", "track_no": song.TrackNo,
                         "artist": artist.Name if artist else "", "album": album.Name if album else "",
-                        "year": str(c.ReleaseYear or "")})
+                        "year": str(c.ReleaseYear or ""), "comment": c.Commnt or ""})
         db.session.close()
         db.engine.dispose()
         return out
@@ -1077,6 +1077,38 @@ def set_title_by_path(file_path: str, new_title: str, new_artist: str | None = N
         return True
     except Exception as e:
         logger.error("Failed to set the title for '%s': %s", file_path, e)
+        return False
+
+
+def merge_comment(existing: str, new: str) -> str:
+    """The comment to store: `new` added after what is already there (" | "), unless it is already in it."""
+    existing, new = (existing or "").strip(), (new or "").strip()
+    if not new or new.lower() in existing.lower():
+        return existing
+    return f"{existing} | {new}" if existing else new
+
+
+def set_comment_by_path(file_path: str, comment: str) -> bool:
+    """Add `comment` to the Comments field Rekordbox shows for the track stored at `file_path` (what is already
+    there is kept). Rekordbox must be closed."""
+    try:
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        content = db.session.query(tables.DjmdContent).filter_by(FolderPath=file_path.replace("\\", "/")).first()
+        if not content:
+            db.session.close()
+            db.engine.dispose()
+            return False
+        content.Commnt = merge_comment(content.Commnt, comment)
+        content.updated_at = datetime.now(timezone.utc)
+        db.session.commit()
+        db.session.close()
+        db.engine.dispose()
+        return True
+    except Exception as e:
+        logger.error("Failed to set the comment for '%s': %s", file_path, e)
         return False
 
 

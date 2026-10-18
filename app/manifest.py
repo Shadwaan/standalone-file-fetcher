@@ -68,7 +68,7 @@ def build_manifest(state: dict, music_root: str, rb) -> dict:
                 sid, rec = by_path.get(_posix(entry["path"]).lower(), (None, {}))
                 tracks.append({
                     "position": len(tracks) + 1, "title": entry["title"], "artist": entry["artist"], "album": entry["album"],
-                    "year": entry["year"], "path": rel, "spotify_id": sid,
+                    "year": entry["year"], "comment": entry.get("comment", ""), "path": rel, "spotify_id": sid,
                     "stand_in": bool(rec.get("stand_in")), "stand_in_label": rec.get("stand_in_label", ""),
                     "source": rec.get("source"),
                 })
@@ -84,6 +84,13 @@ def cmd_export(args) -> int:
     state_file = Path(args.state) if args.state else APP_DIR / "sync_state.json"
     state = json.loads(state_file.read_text(encoding="utf-8"))
     manifest = build_manifest(state, args.music_root, rb)
+    try:
+        import review_sync
+        manifest["review"] = review_sync.build_bundle(args.music_root)
+        print(f"Review decisions included: {len(manifest['review']['marks'])} with marks or notes, "
+              f"{len(manifest['review']['audit'])} flagged files.")
+    except Exception as e:                                   # the manifest is still good without it
+        print(f"Review decisions NOT included ({e}).")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -159,6 +166,8 @@ def apply_import(manifest: dict, music_root: str, rb, state: dict, say=print) ->
                 say(f"    could not add to Rekordbox: {t['title']}")
                 continue
             done["tracks"] += 1
+            if t.get("comment") and hasattr(rb, "set_comment_by_path"):
+                rb.set_comment_by_path(_posix(path), t["comment"])
             if t.get("spotify_id"):                                  # sff's own record, with this computer's paths
                 rec = {"filename": path.name, "file_path": _posix(path), "artist": t["artist"], "title": t["title"]}
                 if t.get("stand_in"):
@@ -197,10 +206,32 @@ def cmd_import(args) -> int:
         shutil.copy2(state_file, state_file.with_name(state_file.name + f".bak.before_import_{time.strftime('%H%M%S')}"))
     done = apply_import(manifest, args.music_root, rb, state)
     rb.flush_wal()
+    _merge_review(manifest, args.music_root, write=True)
     state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\nDone: {done['playlists']} playlists, {done['tracks']} tracks added, {done['missing']} skipped. "
           f"sff's records were written to {state_file}.")
     return 0 if not done["missing"] else 1
+
+
+def _merge_review(manifest: dict, music_root: str, write: bool) -> None:
+    if not manifest.get("review"):
+        print("This manifest carries no review decisions.")
+        return
+    import review_sync
+    r = review_sync.apply_bundle(manifest["review"], music_root, write=write)
+    verb = "merged" if write else "would merge"
+    print(f"Review decisions {verb}: {r['queued']} flagged files queued, {r['marks_added']} items with marks/notes added, "
+          f"{r['marks_filled']} filled in, {len(r['conflicts'])} clashes (yours kept).")
+    for c in r["conflicts"][:20]:
+        print(f"  clash: {c['file']} | {c['field']}: here {c['kept_here']!r}, other computer {c['other']!r}")
+
+
+def cmd_review_import(args) -> int:
+    manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    _merge_review(manifest, args.music_root, write=args.apply)
+    if not args.apply:
+        print("This was a dry run; add --apply to merge. Rekordbox is not touched either way.")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -216,8 +247,12 @@ def main(argv=None) -> int:
     i.add_argument("--apply", action="store_true", help="actually do it (without this it only prints the plan)")
     i.add_argument("--state", help="sync_state.json to write (default: the one in this folder)")
     i.add_argument("--backup-dir", default=str(Path.home() / "sff_rekordbox_backups"))
+    r = sub.add_parser("review-import", help="only merge the review decisions (marks, notes) from a manifest; Rekordbox is not touched")
+    r.add_argument("--manifest", required=True)
+    r.add_argument("--music-root", required=True, help="where the music folder is on THIS computer")
+    r.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
-    return cmd_export(args) if args.command == "export" else cmd_import(args)
+    return {"export": cmd_export, "import": cmd_import, "review-import": cmd_review_import}[args.command](args)
 
 
 if __name__ == "__main__":

@@ -122,6 +122,21 @@ That first run is a **dry run**: it only prints what it found and what is missin
 (in order, with the exact titles) and to write sff's records using this computer's paths. Rekordbox's database is backed up first,
 and the import is safe to repeat. Nothing is downloaded, so later syncs there only fetch what is new.
 
+**Keeping the review page in step on both computers.** The manifest also carries the review page's decisions (your right/wrong marks,
+version labels, private notes, "this is the one I want" ticks and kept songs), keyed by each file's path inside the music folder,
+and Rekordbox Comments travel with each track. An `import --apply` merges the review decisions and fills the Comments. To merge
+**only** the review decisions, with Rekordbox untouched, on either computer:
+
+```
+python manifest.py review-import --manifest /Volumes/SSD/Music/Incoming/sff_manifest.json --music-root /Volumes/SSD/Music/Incoming
+```
+
+(dry run; add `--apply` to merge). Merging never overwrites: items the other computer has not seen are added, a field you left
+empty is filled from the other side, and where both sides hold different values yours stays and the clash is printed. Run
+`export` on the computer where you made the latest decisions, and `review-import` on the other. The "Old MP3" reference tab is
+not available on the second computer (those reference files are not part of the copied library); the YouTube and Spotify
+references still are.
+
 ---
 
 ## Common issues

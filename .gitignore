@@ -27,3 +27,4 @@ suspect_downloads_audit.csv
 .review_cache/
 rejected_sources.json
 review_history.jsonl
+app/not_found_tracks.md

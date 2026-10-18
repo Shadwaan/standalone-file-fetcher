@@ -43,6 +43,11 @@ class FakeRb:
     def flush_wal(self):
         self.flushed = True
 
+    def set_comment_by_path(self, path, comment):
+        self.comments = getattr(self, "comments", {})
+        self.comments[path] = comment
+        return True
+
 
 def entry(title, path, artist="Artist", album="Album", year="2020"):
     return {"title": title, "path": path, "artist": artist, "album": album, "year": year, "track_no": 0}
@@ -78,6 +83,12 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual((a["spotify_id"], a["stand_in"], a["source"]["user"]), ("sid-a", False, "peer"))
         self.assertEqual((kept["spotify_id"], kept["artist"]), (None, "Somebody Else"), "a kept song is not tied to Spotify")
         self.assertEqual(a["path"], "Dub AIFF/a.aiff", "relative to the music folder, so it works anywhere")
+
+    def test_a_rekordbox_comment_travels_in_the_manifest(self):
+        self.rb.playlists["Dub AIFF"][1]["comment"] = "Bangkok Groove"
+        tracks = {t["title"]: t for t in self.build()["playlists"][0]["tracks"]}
+        self.assertEqual(tracks["A"]["comment"], "Bangkok Groove")
+        self.assertEqual(tracks["B [Dub Mix]"]["comment"], "", "no comment: an empty one")
 
     def test_a_file_set_aside_as_wrong_is_not_part_of_the_library(self):
         self.rb.playlists["Dub AIFF"].append(entry("Wrong Song", f"{self.root}/Dub AIFF/_rejected/wrong.aiff"))
@@ -130,6 +141,13 @@ class ImportTest(unittest.TestCase):
         order = sorted(members, key=members.get)
         self.assertEqual([next(c["title"] for c in rb.contents.values() if c["id"] == cid) for cid in order],
                          ["B [Dub Mix]", "A", "Kept Different Song"])
+
+    def test_a_comment_in_the_manifest_is_written_to_rekordbox_on_import(self):
+        self.manifest["playlists"][0]["tracks"][1]["comment"] = "Bangkok Groove"
+        rb = FakeRb()
+        manifest.apply_import(self.manifest, str(self.mac_root), rb, {}, say=lambda *_: None)
+        self.assertEqual(rb.comments, {(self.mac_root / "Dub AIFF" / "a.aiff").as_posix(): "Bangkok Groove"},
+                         "only the track that has one")
 
     def test_sffs_own_records_are_seeded_including_stand_ins_but_not_kept_songs(self):
         state = {}
