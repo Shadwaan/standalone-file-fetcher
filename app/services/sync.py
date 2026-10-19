@@ -493,7 +493,9 @@ class SyncOrchestrator:
         logger.info("=== Sync started ===")
 
         spotify = SpotifyService()
-        playlists = spotify.get_prefixed_playlists()
+        playlists = (getattr(spotify, "get_all_playlists", None) or spotify.get_prefixed_playlists)()
+        for name, why in getattr(spotify, "skipped", []) or []:
+            self.progress.errors.append(f"Could not read the followed playlist '{name}': {why}")
         self.progress.playlists_found = len(playlists)
         self.progress.message = f"Found {len(playlists)} playlists"
 

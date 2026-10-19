@@ -296,7 +296,9 @@ def run_soulseek_sync(orch, source=None) -> dict:
     logger.info("=== Soulseek sync started (formats: %s) ===", ", ".join(formats))
 
     spotify = source or SpotifyService()
-    playlists = spotify.get_prefixed_playlists()
+    playlists = (getattr(spotify, "get_all_playlists", None) or spotify.get_prefixed_playlists)()
+    for name, why in getattr(spotify, "skipped", []) or []:
+        progress.errors.append(f"Could not read the followed playlist '{name}': {why}")
     progress.playlists_found = len(playlists)
 
     try:

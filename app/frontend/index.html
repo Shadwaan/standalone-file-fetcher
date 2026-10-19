@@ -327,6 +327,19 @@
             <ul class="playlist-list" id="playlistList"></ul>
         </div>
 
+        <div class="card" id="followCard">
+            <div class="card-title">Follow another person's playlist <span style="color:#444;font-weight:400;text-transform:none;letter-spacing:0">(synced with every sync, their additions and removals included)</span></div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px">
+                <input type="text" class="modal-input" id="followRef" style="flex:2 1 260px; margin:0"
+                       placeholder="Spotify link, or the exact name of a playlist in your library" autocomplete="off">
+                <input type="text" class="modal-input" id="followName" style="flex:1 1 160px; margin:0"
+                       placeholder="name in Rekordbox (optional)" autocomplete="off">
+                <button class="stop-btn" id="followBtn" style="border-color:#1db954; color:#1db954" onclick="followPlaylist()">+ Follow</button>
+            </div>
+            <div id="followMsg" style="font-size:12px; color:#888; min-height:16px"></div>
+            <ul class="playlist-list" id="followList"></ul>
+        </div>
+
         <div class="card" id="trackedCard" style="display:none">
             <div class="card-title">Tracked Playlists <span style="color:#444;font-weight:400;text-transform:none;letter-spacing:0">(in sync state — click ✕ to stop syncing)</span></div>
             <ul class="playlist-list" id="trackedList"></ul>
@@ -810,6 +823,48 @@
                     : `<span class="badge" style="background:#333;color:#888">No ${f.label} playlist yet</span>`)
                 .join(' ');
         }
+
+        // Following other people's playlists
+        async function loadFollowed() {
+            try {
+                const data = await (await fetch('/api/extra-playlists')).json();
+                const list = document.getElementById('followList');
+                list.innerHTML = (data.playlists || []).map(pl => `
+                    <li class="playlist-item">
+                        <span class="playlist-name">${pl.display_name}</span>
+                        <span class="playlist-meta"><span title="${pl.id}">Spotify: ${pl.name}</span>
+                            <button class="stop-btn" onclick="unfollowPlaylist('${pl.id}', '${(pl.display_name || '').replace(/'/g, "\\'")}')">✕ Unfollow</button>
+                        </span>
+                    </li>`).join('');
+            } catch (e) { /* ignore */ }
+        }
+
+        async function followPlaylist() {
+            const ref = document.getElementById('followRef').value.trim();
+            const msg = document.getElementById('followMsg');
+            if (!ref) { msg.textContent = 'Paste a Spotify link, or type the playlist\'s exact name.'; return; }
+            const btn = document.getElementById('followBtn');
+            btn.disabled = true; msg.textContent = 'Looking it up on Spotify...';
+            try {
+                const res = await fetch('/api/extra-playlists', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ref, display_name: document.getElementById('followName').value.trim() }) });
+                const data = await res.json();
+                if (!res.ok) { msg.textContent = data.error || 'Could not follow that playlist.'; }
+                else {
+                    msg.textContent = `Following "${data.playlist.name}"${data.owner ? ' by ' + data.owner : ''}. It will be synced with your next sync.`;
+                    document.getElementById('followRef').value = ''; document.getElementById('followName').value = '';
+                    loadFollowed();
+                }
+            } catch (e) { msg.textContent = 'Failed: ' + e.message; }
+            btn.disabled = false;
+        }
+
+        async function unfollowPlaylist(id, name) {
+            if (!confirm(`Stop following "${name}"?\n\nRekordbox and the downloaded files are untouched; it just stops being synced.`)) return;
+            await fetch('/api/extra-playlists/' + encodeURIComponent(id), { method: 'DELETE' });
+            loadFollowed(); loadTrackedPlaylists();
+        }
+        loadFollowed();
 
         // Tracked playlists (sync state) + stop-syncing
         async function loadTrackedPlaylists() {

@@ -43,6 +43,7 @@ logger = logging.getLogger("sff")
 # Create FastAPI app
 app = FastAPI(title="Standalone File Fetcher", version="1.0.0")
 
+from services import app_config  # noqa: E402
 from review import router as review_router  # noqa: E402  (listen-and-mark page for flagged downloads)
 app.include_router(review_router)
 
@@ -317,10 +318,47 @@ async def pick_folder():
 async def stop_syncing_playlist(playlist_id: str):
     """Remove a playlist from sync_state.json. Does NOT touch Rekordbox/Traktor."""
     orchestrator = _get_orchestrator()
+    unfollowed = app_config.remove_extra_playlist(playlist_id)      # a followed playlist must not be picked up again
     result = orchestrator.stop_syncing_playlist(playlist_id)
-    if not result.get("removed"):
+    if not result.get("removed") and not unfollowed:
         return JSONResponse(result, status_code=404)
-    return result
+    return {**result, "removed": True, "unfollowed": unfollowed}
+
+
+class FollowRequest(BaseModel):
+    ref: str                     # a Spotify link, URI or id, or the exact name of a playlist in your library
+    display_name: str = ""       # what to call it in Rekordbox (default: its Spotify name)
+
+
+@app.get("/api/extra-playlists")
+async def list_extra_playlists():
+    """Playlists by other people that are synced along with the FF ones."""
+    return {"playlists": app_config.get_extra_playlists()}
+
+
+@app.post("/api/extra-playlists")
+async def follow_playlist(body: FollowRequest):
+    """Keep somebody else's playlist in sync: it is read on every sync, so their additions and removals follow."""
+    from services.spotify import SpotifyService
+    loop = asyncio.get_event_loop()
+
+    def _resolve():
+        return SpotifyService().resolve_followable(body.ref)
+
+    try:
+        info = await loop.run_in_executor(None, _resolve)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    entry = app_config.add_extra_playlist(info["id"], info["name"], body.display_name or info["name"])
+    return {"playlist": entry, "owner": info.get("owner", "")}
+
+
+@app.delete("/api/extra-playlists/{playlist_id}")
+async def unfollow_playlist(playlist_id: str):
+    """Stop following it. Rekordbox and the downloaded files are untouched."""
+    if not app_config.remove_extra_playlist(playlist_id):
+        return JSONResponse({"error": "not followed"}, status_code=404)
+    return {"removed": True}
 
 
 @app.get("/api/playlists/tracked")

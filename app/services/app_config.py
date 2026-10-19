@@ -28,6 +28,7 @@ _DEFAULTS = {
     "sync_to_traktor": False,    # also write to Traktor's collection.nml on each sync
     "download_source": "youtube",  # "youtube" (yt-dlp, MP3) or "soulseek" (Nicotine+, lossless)
     "output_formats": ["flac"],    # Soulseek only: any of "flac", "aiff", "wav" -- one playlist each
+    "extra_playlists": [],         # other people's playlists to keep in sync: [{"id", "name", "display_name"}]
 }
 
 
@@ -114,6 +115,37 @@ def set_sync_to_traktor(enabled: bool) -> dict:
     save(cfg)
     logger.info("sync_to_traktor set to %s", cfg["sync_to_traktor"])
     return cfg
+
+
+def get_extra_playlists() -> list[dict]:
+    """Playlists made by other people that are synced alongside the prefixed ones."""
+    items = load().get("extra_playlists") or []
+    return [i for i in items if isinstance(i, dict) and i.get("id")]
+
+
+def add_extra_playlist(playlist_id: str, name: str, display_name: str = "") -> dict:
+    """Follow another playlist (by Spotify id). Adding the same id again just updates its names."""
+    if not playlist_id:
+        raise ValueError("a playlist id is required")
+    cfg = load()
+    items = [i for i in (cfg.get("extra_playlists") or []) if i.get("id") != playlist_id]
+    entry = {"id": playlist_id, "name": name, "display_name": (display_name or name).strip()}
+    items.append(entry)
+    cfg["extra_playlists"] = items
+    save(cfg)
+    logger.info("now following playlist %s (%s)", name, playlist_id)
+    return entry
+
+
+def remove_extra_playlist(playlist_id: str) -> bool:
+    cfg = load()
+    items = cfg.get("extra_playlists") or []
+    kept = [i for i in items if i.get("id") != playlist_id]
+    if len(kept) == len(items):
+        return False
+    cfg["extra_playlists"] = kept
+    save(cfg)
+    return True
 
 
 def get_download_source() -> str:
