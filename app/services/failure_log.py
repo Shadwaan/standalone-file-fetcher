@@ -39,8 +39,10 @@ DEFAULT_COOLDOWN_HOURS = 24
 COOLDOWN_HOURS = {"source did not deliver": 6}
 
 
-def recently_failed(now: datetime | None = None) -> dict[str, dict]:
-    """{spotify_id: record} for tracks still inside their cooldown."""
+def recently_failed(now: datetime | None = None, cooldown_hours: float | None = None) -> dict[str, dict]:
+    """{spotify_id: record} for tracks still inside their cooldown. `cooldown_hours` replaces the usual cooldowns
+    (24 h, 6 h for "source did not deliver") for one run, e.g. to treat everything that failed in the last month as
+    already checked."""
     now = now or datetime.now()
     out = {}
     for sid, rec in _load().items():
@@ -48,9 +50,38 @@ def recently_failed(now: datetime | None = None) -> dict[str, dict]:
             age_hours = (now - datetime.fromisoformat(rec["last_failed"])).total_seconds() / 3600
         except (KeyError, ValueError):
             continue
-        if age_hours < COOLDOWN_HOURS.get(rec.get("category"), DEFAULT_COOLDOWN_HOURS):
+        if age_hours < (cooldown_hours or COOLDOWN_HOURS.get(rec.get("category"), DEFAULT_COOLDOWN_HOURS)):
             out[sid] = rec
     return out
+
+
+# YouTube lookups that found nothing usable, so a track that is simply not on YouTube either is not looked up on
+# every sync.
+YOUTUBE_MISS_DAYS = 7
+
+
+def _misses_file() -> Path:
+    return FILE.with_name("youtube_misses.json")
+
+
+def youtube_missed_recently(spotify_id: str, now: datetime | None = None) -> bool:
+    try:
+        when = json.loads(_misses_file().read_text(encoding="utf-8")).get(spotify_id)
+        return bool(when) and ((now or datetime.now()) - datetime.fromisoformat(when)).days < YOUTUBE_MISS_DAYS
+    except (OSError, ValueError):
+        return False
+
+
+def record_youtube_miss(spotify_id: str) -> None:
+    try:
+        try:
+            data = json.loads(_misses_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        data[spotify_id] = datetime.now().isoformat(timespec="seconds")
+        _misses_file().write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def all_failures() -> list[dict]:

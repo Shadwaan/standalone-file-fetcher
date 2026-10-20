@@ -179,6 +179,28 @@ def apply_import(manifest: dict, music_root: str, rb, state: dict, say=print) ->
     return done
 
 
+def _print_library_report(rb, plan_found, before: bool) -> bool:
+    """Say what Rekordbox already holds for the files about to be (or just) imported. Returns True when something is doubled."""
+    if not hasattr(rb, "library_report"):
+        return False
+    r = rb.library_report([_posix(path) for _, _, path in plan_found])
+    if r["present"] is None:
+        print("(could not read Rekordbox's library to check for existing rows)")
+        return False
+    total = len(plan_found)
+    if before:
+        print(f"Already in Rekordbox: {r['present']} of {total} files have a row (they are reused, not added again). "
+              f"Files with MORE than one row: {len(r['duplicate_paths'])}. Playlist names that appear twice: {len(r['duplicate_playlist_names'])}.")
+    doubled = bool(r["duplicate_paths"] or r["duplicate_playlist_names"])
+    if doubled:
+        print("  WARNING: the library already has doubled entries (this import does not create them, and does not remove them):")
+        for path in r["duplicate_paths"][:10]:
+            print(f"    two rows for one file: {path}")
+        for name in r["duplicate_playlist_names"][:10]:
+            print(f"    two playlists named: {name!r}")
+    return doubled
+
+
 def cmd_import(args) -> int:
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
     if manifest.get("format") != FORMAT_VERSION:
@@ -190,10 +212,11 @@ def cmd_import(args) -> int:
           f"{len(plan['missing'])} missing.")
     for name, t, path in plan["missing"][:15]:
         print(f"  missing: {name} | {t['path']}")
+    from services import rekordbox as rb
     if not args.apply:
+        _print_library_report(rb, plan["found"], before=True)
         print("\nThis was a dry run. Close Rekordbox, then run it again with --apply to build the playlists.")
         return 0
-    from services import rekordbox as rb
     from services.platform_paths import is_rekordbox_running
     if is_rekordbox_running():
         print("Rekordbox is open. Close it first: its library cannot be edited while it is running.")
@@ -207,6 +230,8 @@ def cmd_import(args) -> int:
     done = apply_import(manifest, args.music_root, rb, state)
     rb.flush_wal()
     _merge_review(manifest, args.music_root, write=True)
+    if _print_library_report(rb, plan["found"], before=False):
+        print("  CHECK THIS: some files or playlists are doubled in Rekordbox now. Do not run a sync until they are sorted out.")
     state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\nDone: {done['playlists']} playlists, {done['tracks']} tracks added, {done['missing']} skipped. "
           f"sff's records were written to {state_file}.")

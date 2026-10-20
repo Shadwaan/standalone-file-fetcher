@@ -149,6 +149,37 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(rb.comments, {(self.mac_root / "Dub AIFF" / "a.aiff").as_posix(): "Bangkok Groove"},
                          "only the track that has one")
 
+    def test_the_dry_run_says_what_is_already_in_rekordbox_and_warns_about_doubles(self):
+        import contextlib
+        import io
+
+        class Rb(FakeRb):
+            def library_report(self, paths):
+                return {"present": len(paths) - 1, "duplicate_paths": [paths[0]], "duplicate_playlist_names": ["Dub AIFF"]}
+        found = manifest.plan_import(self.manifest, str(self.mac_root))["found"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            doubled = manifest._print_library_report(Rb(), found, before=True)
+        text = out.getvalue()
+        self.assertTrue(doubled)
+        self.assertIn("Already in Rekordbox: 2 of 3 files have a row", text)
+        self.assertIn("MORE than one row: 1", text)
+        self.assertIn("two playlists named: 'Dub AIFF'", text)
+
+    def test_a_clean_library_prints_no_warning(self):
+        import contextlib
+        import io
+
+        class Rb(FakeRb):
+            def library_report(self, paths):
+                return {"present": 0, "duplicate_paths": [], "duplicate_playlist_names": []}
+        found = manifest.plan_import(self.manifest, str(self.mac_root))["found"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            doubled = manifest._print_library_report(Rb(), found, before=True)
+        self.assertFalse(doubled)
+        self.assertNotIn("WARNING", out.getvalue())
+
     def test_sffs_own_records_are_seeded_including_stand_ins_but_not_kept_songs(self):
         state = {}
         manifest.apply_import(self.manifest, str(self.mac_root), FakeRb(), state, say=lambda *_: None)

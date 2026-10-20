@@ -131,6 +131,15 @@ class DuplicateReportTest(unittest.TestCase):
     def test_a_missing_folder_is_fine(self):
         self.assertEqual(sync_soulseek.find_suffix_duplicates(self.tmp / "nope"), [])
 
+    def test_the_same_name_in_two_formats_that_sounds_the_same_is_reported_with_the_better_format_first(self):
+        better, worse = self.tmp / "Song.flac", self.tmp / "Song.mp3"
+        make_audio(better, "song_a"); make_audio(worse, "song_a_mp3")
+        self.assertEqual(sync_soulseek.find_suffix_duplicates(self.tmp), [(better, worse)])
+
+    def test_the_same_name_in_two_formats_with_different_audio_is_not(self):
+        make_audio(self.tmp / "Song.flac", "song_a"); make_audio(self.tmp / "Song.mp3", "song_b_mp3")
+        self.assertEqual(sync_soulseek.find_suffix_duplicates(self.tmp), [])
+
 
 class NamedEditTest(unittest.TestCase):
     """A plain "Radio Edit" must not be satisfied by somebody else's named edit (the Hardwell case)."""

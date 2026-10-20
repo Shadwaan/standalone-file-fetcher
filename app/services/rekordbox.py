@@ -329,15 +329,47 @@ def _audio_properties(file_path: str) -> tuple[int, int, int]:
     return file_type, bitrate, sample_rate
 
 
-def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
-    """Import a track into Rekordbox DB WITHOUT analysis. Rekordbox will analyze it on open."""
+def _content_via_add_content(db, normalized: str, title: str, bitrate: int, sample_rate: int, artist_id, album_id):
+    """The new DjmdContent row made by pyrekordbox's add_content, with sff's "drag-import parity" fields on top (without
+    them Rekordbox's batch analysis hangs). None when add_content cannot make it (e.g. no device row, an odd extension)."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        extra = dict(Title=title, BitRate=bitrate, SampleRate=sample_rate, Analysed=0, DeliveryControl="on", ColorID="0",
+                     DJPlayCount=0, DiscNo=0, Rating=0, TrackNo=0, rb_data_status=0, rb_local_data_status=0,
+                     rb_local_deleted=0, rb_local_synced=0,
+                     created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        if artist_id:
+            extra["ArtistID"] = artist_id
+        if album_id:
+            extra["AlbumID"] = album_id
+        content = db.add_content(normalized, **extra)
+        content.FolderPath = normalized          # add_content stores str(Path): backslashes on Windows; Rekordbox keeps forward slashes
+        content.StockDate = today
+        content.DateCreated = today
+        return content
+    except Exception as e:
+        logger.warning("add_content could not make the row for %s (%s): building it by hand", normalized, e)
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def import_track_unanalyzed(file_path: str, track: TrackInfo, db_path=None) -> dict:
+    """Import a track into Rekordbox DB WITHOUT analysis. Rekordbox will analyze it on open.
+
+    The row is made with pyrekordbox's own add_content, which is how Rekordbox's tools make one: it carries the device and
+    master-database ids, the file id and the content link. Rows built by hand without them (what this used to do, with
+    usn = 0) show up on a CDJ/XDJ over PRO DJ LINK but will not play. If add_content cannot make the row, the old
+    hand-built row is used instead so an import never fails on this. `db_path` is for testing on a copy."""
     try:
         from pyrekordbox import Rekordbox6Database
         from pyrekordbox.db6 import tables
         import random
         from sqlalchemy import func as sa_func
 
-        db = Rekordbox6Database()
+        db = Rekordbox6Database(path=db_path) if db_path else Rekordbox6Database()
 
         # Check if already exists
         normalized = file_path.replace("\\", "/")
@@ -356,6 +388,16 @@ def import_track_unanalyzed(file_path: str, track: TrackInfo) -> dict:
 
         file_type, actual_bitrate, actual_sr = _audio_properties(file_path)
 
+        artist_id = _get_or_create_artist(db, tables, track.artist)
+        album_id = _get_or_create_album(db, tables, track.album, artist_id=artist_id)
+        content = _content_via_add_content(db, normalized, track.title, actual_bitrate, actual_sr, artist_id, album_id)
+        if content is not None:
+            db.commit()
+            logger.info("Imported to Rekordbox (unanalyzed): %s (ID=%s, UUID=%s, ArtistID=%s, AlbumID=%s)",
+                        track.title, content.ID, content.UUID, artist_id, album_id)
+            return {"status": "imported", "id": str(content.ID)}
+
+        # the fallback: the row built by hand
         content = tables.DjmdContent()
         content.ID = new_id
         content.UUID = str(_uuid.uuid4())  # CRITICAL: Rekordbox uses UUID to build ANLZ paths
@@ -1078,6 +1120,27 @@ def set_title_by_path(file_path: str, new_title: str, new_artist: str | None = N
     except Exception as e:
         logger.error("Failed to set the title for '%s': %s", file_path, e)
         return False
+
+
+def library_report(paths: list[str]) -> dict:
+    """What Rekordbox already holds for these file paths, read-only: how many have a row, which have MORE than one row, and
+    which playlist names appear more than once. Used to show, before and after an import, whether it would double anything."""
+    try:
+        from collections import Counter
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        wanted = {p.replace("\\", "/") for p in paths}
+        counts = Counter(path for (path,) in db.session.query(tables.DjmdContent.FolderPath).all() if path in wanted)
+        names = Counter(name for (name,) in db.session.query(tables.DjmdPlaylist.Name).all())
+        db.session.close()
+        db.engine.dispose()
+        return {"present": len(counts), "duplicate_paths": sorted(p for p, n in counts.items() if n > 1),
+                "duplicate_playlist_names": sorted(n for n, c in names.items() if c > 1 and n)}
+    except Exception as e:
+        logger.warning("Could not read the library report: %s", e)
+        return {"present": None, "duplicate_paths": [], "duplicate_playlist_names": []}
 
 
 def merge_comment(existing: str, new: str) -> str:

@@ -29,6 +29,8 @@ _DEFAULTS = {
     "download_source": "youtube",  # "youtube" (yt-dlp, MP3) or "soulseek" (Nicotine+, lossless)
     "output_formats": ["flac"],    # Soulseek only: any of "flac", "aiff", "wav" -- one playlist each
     "extra_playlists": [],         # other people's playlists to keep in sync: [{"id", "name", "display_name"}]
+    "skip_playlists_once": [],     # playlist names (as shown in Rekordbox, without the format) left out of the NEXT sync only
+    "failed_cooldown_hours": None, # for ONE run: treat tracks that failed within this many hours as already checked
     "youtube_fallback": False,     # Soulseek only: fill a track nothing else could supply with a labelled YouTube copy
 }
 
@@ -116,6 +118,15 @@ def set_sync_to_traktor(enabled: bool) -> dict:
     save(cfg)
     logger.info("sync_to_traktor set to %s", cfg["sync_to_traktor"])
     return cfg
+
+
+def get_skip_playlists_once() -> list[str]:
+    return [str(n).strip().lower() for n in (load().get("skip_playlists_once") or []) if str(n).strip()]
+
+
+def get_failed_cooldown_hours() -> float | None:
+    value = load().get("failed_cooldown_hours")
+    return float(value) if value else None
 
 
 def get_youtube_fallback() -> bool:

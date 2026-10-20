@@ -471,6 +471,23 @@ def _search_many(queries: list[str]) -> list[list[dict]]:
     return out
 
 
+import contextlib
+
+
+@contextlib.contextmanager
+def quick_limits():
+    """For a quick run: fewer attempts per track, give up sooner when nothing matches, and wait much less for a queued
+    source. The normal limits come back afterwards."""
+    names = {"MAX_ATTEMPTS_PER_TRACK": 3, "GIVE_UP_IF_NOTHING_AFTER": 2, "QUEUE_PATIENCE_SECONDS": 10 * 60,
+             "MAX_CAPPED_WAITS": 5}
+    saved = {n: globals()[n] for n in names}
+    globals().update(names)
+    try:
+        yield
+    finally:
+        globals().update(saved)
+
+
 def is_connected() -> bool:
     """Is Nicotine+ logged in to the Soulseek server? (Unknown counts as yes: this only
     exists to stop retries being wasted while it's known to be offline.)"""

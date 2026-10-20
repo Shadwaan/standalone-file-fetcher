@@ -18,6 +18,7 @@ Each Spotify playlist can have a playlist per format ("<name> FLAC", "<name> AIF
 Spotify gained since.
 """
 
+import contextlib
 import dataclasses
 import logging
 import os
@@ -302,11 +303,22 @@ def run_soulseek_sync(orch, source=None) -> dict:
         progress.errors.append(f"Could not read the followed playlist '{name}': {why}")
     progress.playlists_found = len(playlists)
 
+    skip = set(app_config.get_skip_playlists_once())
     try:
         for pl in playlists:
+            if skip & {pl["display_name"].strip().lower(), pl["name"].strip().lower()}:
+                logger.info("Skipping playlist %s for this run, as asked", pl["display_name"])
+                progress.errors.append(f"Left out of this run, as you asked: {pl['display_name']}")
+                continue
             _sync_playlist(orch, spotify, pl, formats, music_folder, nicotine_dir)
 
         _report_duplicates(progress, music_folder, playlists)
+        if app_config.get_failed_cooldown_hours() or skip:      # these settings were for this one run only
+            cfg = app_config.load()
+            cfg["failed_cooldown_hours"] = None
+            cfg["skip_playlists_once"] = []
+            app_config.save(cfg)
+            logger.info("the longer 'already checked' window and the skipped playlists were for this run only: back to normal")
         progress.status = "done"
         progress.phase = "complete"
         labels = "/".join(audio_formats.FORMATS[f].label for f in formats)
@@ -325,6 +337,15 @@ def find_suffix_duplicates(folder: Path) -> list[tuple[Path, Path]]:
     """Pairs (original, copy) in one folder where the copy is the original's name + _1/_2... and sounds identical."""
     pairs = []
     files = {p.name.lower(): p for p in folder.iterdir() if p.is_file() and not p.name.startswith("._")} if folder.is_dir() else {}
+    # the same name in two formats (Song.mp3 next to Song.aiff) that sound identical
+    by_stem: dict[str, list] = {}
+    for p in files.values():
+        by_stem.setdefault(p.stem.lower(), []).append(p)
+    for group in by_stem.values():
+        group.sort(key=lambda p: soulseek.FORMAT_TIER.get(p.suffix.lower(), 0), reverse=True)     # keep the better format first
+        for other in group[1:]:
+            if audio_formats.same_recording(other, group[0]):
+                pairs.append((group[0], other))
     for low, p in files.items():
         stem = p.stem
         if "_" not in stem or not stem.rsplit("_", 1)[1].isdigit():
@@ -362,13 +383,28 @@ def _has_a_file(variants, sid: str, fmts) -> bool:
     return False
 
 
+def _youtube_copy_elsewhere(playlists_state: dict, sid: str, exclude=()):
+    """(path, source) of a YouTube stand-in recorded for this Spotify track in ANOTHER playlist (one of `exclude`'s
+    record dicts is the playlist being synced), if its file is still there."""
+    for pl in playlists_state.values():
+        for v in (pl.get("variants") or {}).values():
+            if any(v.get("tracks") is own for own in exclude):
+                continue
+            rec = (v.get("tracks") or {}).get(sid) or {}
+            if rec.get("stand_in") and (rec.get("source") or {}).get("how") == "youtube" and rec.get("file_path"):
+                path = Path(rec["file_path"])
+                if path.is_file():
+                    return path, rec["source"]
+    return None
+
+
 def _youtube_fill_in(track, work_dir: Path, reference):
     try:
         from services import youtube_fill
         return youtube_fill.fill_in(track, work_dir, reference)
     except Exception as e:                       # a missing fill-in must never stop the sync
         logger.warning("YouTube fill-in failed for %s - %s: %s", track.artist, track.title, e)
-        return None
+        return False                             # an error, not "nothing on YouTube": it is not remembered as a miss
 
 
 def _retire_youtube_copy(v, old: dict, new_path: str) -> None:
@@ -453,7 +489,11 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
     # 2. SOURCE -- reuse what we already have before going to Soulseek
     existing = {sid: _existing_sources(orch._state["playlists"], track_by_id[sid], library, siblings) for sid in needed}
     derived = {sid: found[0] for sid, found in existing.items() if found}
-    to_download = [track_by_id[sid] for sid in needed if sid not in derived]
+    # the same track filled in from YouTube for another playlist: reuse that file instead of searching and downloading again
+    mine = [v.state.get("tracks") for v in variants.values()]          # this playlist's own records: not "elsewhere"
+    shared = {sid: found for sid in needed if sid not in derived
+              for found in [_youtube_copy_elsewhere(orch._state["playlists"], sid, mine)] if found}
+    to_download = [track_by_id[sid] for sid in needed if sid not in derived and sid not in shared]
     states = {}
     if to_download:
         def _cb(msg):
@@ -464,7 +504,12 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
             prefer.add(".aif")
         progress.phase = "searching"
         # Tracks that failed recently are not searched for again (unless "Retry failed" was pressed).
-        cooling_down = set() if getattr(orch, "retry_recent_failures", False) else set(failure_log.recently_failed())
+        quick = bool(app_config.get_failed_cooldown_hours())       # a quick run: what is known to be missing is not searched again
+        cooling_down = set() if getattr(orch, "retry_recent_failures", False) else set(
+            failure_log.recently_failed(cooldown_hours=app_config.get_failed_cooldown_hours()))
+        if quick:                                              # different mixes kept as stand-ins are re-searched every run: not this one
+            cooling_down |= {sid for sid in needed for v in variants.values()
+                             if (v.state.get("tracks") or {}).get(sid, {}).get("stand_in")}
         states = soulseek.search_and_queue_all(to_download, on_progress=_cb, local_dir=nicotine_dir, prefer_exts=prefer,
                                                defer_ids=cooling_down)
         progress.phase = "downloading"
@@ -475,20 +520,31 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
                 f"open Nicotine+ > Private Chat > {req['user']} and {ask} yourself. sff will not answer these for you.")
 
         references = _references(needed, track_by_id, library)
-        soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir,
-                             validate=_make_validator(references, findings,
-                                                      _rejected_files(track_by_id, [t.spotify_id for t in to_download]),
-                                                      _held_files(orch._state["playlists"], [t.spotify_id for t in to_download])),
-                             on_notice=_notice)
+        with (soulseek.quick_limits() if quick else contextlib.nullcontext()):
+            soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir,
+                                 validate=_make_validator(references, findings,
+                                                          _rejected_files(track_by_id, [t.spotify_id for t in to_download]),
+                                                          _held_files(orch._state["playlists"], [t.spotify_id for t in to_download])),
+                                 on_notice=_notice)
 
     # 3. FILE WORK
     progress.phase = "converting"
     planned = []
     failures: list[dict] = []
+    filled_failures: list[dict] = []        # tracks Soulseek failed on that a YouTube copy now stands in for
     for sid, fmts in needed.items():
         track = track_by_id[sid]
         label = f"{track.artist} - {track.title}"
         keep_source = sid in derived
+
+        if sid in shared:
+            shared_path, shared_source = shared[sid]
+            sources[sid] = dict(shared_source)
+            for fmt in fmts:
+                planned.append((sid, fmt, shared_path))
+            progress.tracks_skipped += len(fmts)
+            logger.info("%s already has a YouTube copy from another playlist: %s", label, shared_path.name)
+            continue
 
         if keep_source:
             src = derived[sid]
@@ -496,18 +552,32 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
         else:
             st = states.get(sid)
             src = soulseek.download_path_for(st, nicotine_dir) if st and st.downloaded else None
-            if not src and st and st.deferred:
-                progress.tracks_deferred += len(fmts)
-                logger.info("not searching again for %s: it failed recently", label)
-                continue
             fill = None
-            if not src and app_config.get_youtube_fallback() and not _has_a_file(variants, sid, fmts):
+            # nothing from Soulseek, whether it was searched just now or was left alone because it failed recently:
+            # a YouTube copy, unless the track already has a file or YouTube had nothing usable lately either
+            if (not src and app_config.get_youtube_fallback() and not _has_a_file(variants, sid, fmts)
+                    and not failure_log.youtube_missed_recently(sid)):
                 progress.message = f"Nothing on Soulseek for {label}: trying YouTube"
                 fill = _youtube_fill_in(track, Path(nicotine_dir) / "_youtube", references.get(sid))
+                if fill is None:
+                    failure_log.record_youtube_miss(sid)         # YouTube really had nothing usable
+                fill = fill or None
                 if fill:
                     src = fill["path"]
                     sources[sid] = {"user": "", "remote_path": fill["url"], "how": "youtube", "codec": fill["codec"],
                                     "abr": fill["abr"], "label": fill["label"], "video_title": fill["video_title"]}
+            if fill:
+                # Soulseek had nothing: that stays on record (it keeps the track out of the next searches until the cooldown
+                # passes, and on the shopping list) even though a YouTube copy now stands in
+                filled_failures.append({"spotify_id": sid, "artist": track.artist, "title": track.title,
+                                        "playlist": variants[fmts[0]].display_name,
+                                        "category": st.failure_category() if st else "no results",
+                                        "detail": st.why_no_source() if st else "not found on Soulseek",
+                                        "attempts": st.attempts if st else 0})
+            if not src and st and st.deferred:
+                progress.tracks_deferred += len(fmts)
+                logger.info("not searching again for %s: it failed recently", label)
+                continue
             if not src:
                 progress.tracks_failed += len(fmts)
                 progress.errors.append(f"Soulseek: no source found for {label} -- {st.why_no_source() if st else 'never searched'}")
@@ -610,7 +680,9 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
             logger.info("%d download(s) queued for your review", added)
 
     # persistent records, so what Soulseek couldn't supply, and who supplied the rest, survive turning sff off
-    failure_log.record(failures, resolved_ids={sid for sid, _, _ in planned})
+    youtube_stand_ins = {sid for sid, _, _ in planned if sources.get(sid, {}).get("how") == "youtube"}
+    failure_log.record(failures + [f for f in filled_failures if f["spotify_id"] in youtube_stand_ins],
+                       resolved_ids={sid for sid, _, _ in planned} - youtube_stand_ins)
     source_log.record([
         {"playlist": variants[fmt].display_name, "artist": track_by_id[sid].artist, "title": track_by_id[sid].title,
          "from_user": sources.get(sid, {}).get("user", ""), "remote_path": sources.get(sid, {}).get("remote_path", ""),
