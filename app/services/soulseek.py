@@ -478,7 +478,7 @@ import contextlib
 def quick_limits():
     """For a quick run: fewer attempts per track, give up sooner when nothing matches, and wait much less for a queued
     source. The normal limits come back afterwards."""
-    names = {"MAX_ATTEMPTS_PER_TRACK": 3, "GIVE_UP_IF_NOTHING_AFTER": 2, "QUEUE_PATIENCE_SECONDS": 10 * 60,
+    names = {"MAX_ATTEMPTS_PER_TRACK": 3, "GIVE_UP_IF_NOTHING_AFTER": 2, "QUEUE_PATIENCE_SECONDS": 90,
              "MAX_CAPPED_WAITS": 5}
     saved = {n: globals()[n] for n in names}
     globals().update(names)

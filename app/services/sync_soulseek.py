@@ -495,6 +495,7 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
               for found in [_youtube_copy_elsewhere(orch._state["playlists"], sid, mine)] if found}
     to_download = [track_by_id[sid] for sid in needed if sid not in derived and sid not in shared]
     states = {}
+    validate_fn = None
     if to_download:
         def _cb(msg):
             progress.message = msg
@@ -520,12 +521,11 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
                 f"open Nicotine+ > Private Chat > {req['user']} and {ask} yourself. sff will not answer these for you.")
 
         references = _references(needed, track_by_id, library)
+        validate_fn = _make_validator(references, findings,
+                                      _rejected_files(track_by_id, [t.spotify_id for t in to_download]),
+                                      _held_files(orch._state["playlists"], [t.spotify_id for t in to_download]))
         with (soulseek.quick_limits() if quick else contextlib.nullcontext()):
-            soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir,
-                                 validate=_make_validator(references, findings,
-                                                          _rejected_files(track_by_id, [t.spotify_id for t in to_download]),
-                                                          _held_files(orch._state["playlists"], [t.spotify_id for t in to_download])),
-                                 on_notice=_notice)
+            soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir, validate=validate_fn, on_notice=_notice)
 
     # 3. FILE WORK
     progress.phase = "converting"
@@ -552,6 +552,13 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
         else:
             st = states.get(sid)
             src = soulseek.download_path_for(st, nicotine_dir) if st and st.downloaded else None
+            if src and validate_fn and not (st.key and st.key[0]):
+                # found already sitting in the Nicotine+ folder (an earlier run's download): it was never judged by the
+                # download gate, so a file you rejected could come straight back in this way
+                verdict = validate_fn(src, track)
+                if verdict is not True:
+                    logger.info("not using %s from the Nicotine+ folder for %s: %s", src.name, label, verdict)
+                    src = None
             fill = None
             # nothing from Soulseek, whether it was searched just now or was left alone because it failed recently:
             # a YouTube copy, unless the track already has a file or YouTube had nothing usable lately either

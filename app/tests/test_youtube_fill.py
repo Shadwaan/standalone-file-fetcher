@@ -251,6 +251,30 @@ class YoutubeFillInTest(SyncFixture):
             self.assertLess(soulseek.QUEUE_PATIENCE_SECONDS, before[1])
         self.assertEqual((soulseek.MAX_ATTEMPTS_PER_TRACK, soulseek.QUEUE_PATIENCE_SECONDS), before)
 
+    def test_a_rejected_recording_already_in_the_nicotine_folder_is_not_taken_back_in(self):
+        bad = self.tmp / "Library" / "_rejected" / "Ghost Song.flac"
+        make_audio(bad, "song_a")
+        make_audio(self.nic / "01 - Ghost Song.flac", "song_a")             # an earlier run's download, same wrong recording
+        with mock.patch("services.sync_soulseek._rejected_files", return_value={"id-ghost": [bad]}):
+            result = self.run_sync()
+        self.assertEqual(self.titles_or_none(), [], "not imported")
+        self.assertEqual(result["tracks_failed"], 1)
+
+    def test_a_different_recording_already_in_the_nicotine_folder_is_used(self):
+        bad = self.tmp / "Library" / "_rejected" / "Ghost Song.flac"
+        make_audio(bad, "song_a")
+        make_audio(self.nic / "01 - Ghost Song.flac", "song_b")
+        with mock.patch("services.sync_soulseek._rejected_files", return_value={"id-ghost": [bad]}):
+            result = self.run_sync()
+        self.assertEqual(self.titles(), ["Ghost Song"])
+        self.assertEqual(result["tracks_failed"], 0)
+
+    def titles_or_none(self):
+        try:
+            return self.titles()
+        except StopIteration:
+            return []
+
     def test_a_failing_youtube_lookup_never_stops_the_sync(self):
         self.enable()
         with mock.patch("services.youtube_fill.fill_in", side_effect=RuntimeError("yt-dlp broke")):
