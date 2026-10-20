@@ -29,6 +29,7 @@ _DEFAULTS = {
     "download_source": "youtube",  # "youtube" (yt-dlp, MP3) or "soulseek" (Nicotine+, lossless)
     "output_formats": ["flac"],    # Soulseek only: any of "flac", "aiff", "wav" -- one playlist each
     "extra_playlists": [],         # other people's playlists to keep in sync: [{"id", "name", "display_name"}]
+    "youtube_fallback": False,     # Soulseek only: fill a track nothing else could supply with a labelled YouTube copy
 }
 
 
@@ -114,6 +115,18 @@ def set_sync_to_traktor(enabled: bool) -> dict:
     cfg["sync_to_traktor"] = bool(enabled)
     save(cfg)
     logger.info("sync_to_traktor set to %s", cfg["sync_to_traktor"])
+    return cfg
+
+
+def get_youtube_fallback() -> bool:
+    return bool(load().get("youtube_fallback", False))
+
+
+def set_youtube_fallback(enabled: bool) -> dict:
+    cfg = load()
+    cfg["youtube_fallback"] = bool(enabled)
+    save(cfg)
+    logger.info("youtube_fallback set to %s", cfg["youtube_fallback"])
     return cfg
 
 

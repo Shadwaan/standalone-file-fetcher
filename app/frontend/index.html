@@ -327,6 +327,17 @@
             <ul class="playlist-list" id="playlistList"></ul>
         </div>
 
+        <div class="card" id="buyCard">
+            <div class="card-title">Not on Soulseek: to buy <span style="color:#444;font-weight:400;text-transform:none;letter-spacing:0">(tracks no lossless copy could be found for)</span></div>
+            <label style="display:flex; gap:8px; align-items:center; font-size:13px; color:#bbb; margin-bottom:8px; cursor:pointer">
+                <input type="checkbox" id="ytFallbackBox" onchange="setYoutubeFallback(this.checked)">
+                Until then, fill a track Soulseek can't supply at all with a YouTube copy, labelled with its real quality (e.g. "[YT opus 130k]")
+            </label>
+            <div id="buySummary" style="font-size:13px; color:#aaa; margin-bottom:8px"></div>
+            <div style="margin-bottom:8px"><a id="buyCsv" href="/api/to-buy.csv" style="color:#1db954; font-size:12px">Download as a spreadsheet (CSV)</a></div>
+            <div id="buyList" style="max-height:420px; overflow:auto"></div>
+        </div>
+
         <div class="card" id="followCard">
             <div class="card-title">Follow another person's playlist <span style="color:#444;font-weight:400;text-transform:none;letter-spacing:0">(synced with every sync, their additions and removals included)</span></div>
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px">
@@ -400,6 +411,7 @@
             syncBtn.classList.remove('running');
             retryBtn.classList.remove('running');
             syncBtn.textContent = 'Sync';
+            if (typeof loadToBuy === 'function') loadToBuy();
         }
 
         // Show "Retry failed (N)" only while there are queued failures.
@@ -823,6 +835,60 @@
                     : `<span class="badge" style="background:#333;color:#888">No ${f.label} playlist yet</span>`)
                 .join(' ');
         }
+
+        // The shopping list: tracks Soulseek could not supply
+        async function loadToBuy() {
+            try {
+                const data = await (await fetch('/api/to-buy')).json();
+                const items = data.items || [];
+                const counts = data.counts || {};
+                const box = document.getElementById('buySummary');
+                box.textContent = items.length === 0 ? 'Nothing is missing right now.' :
+                    `${items.length} tracks: ` + Object.entries(counts).map(([g, n]) => `${n} ${g.toLowerCase()}`).join(', ') +
+                    (data.with_youtube_copy ? `; ${data.with_youtube_copy} have a YouTube copy in the playlist meanwhile` : '');
+                const list = document.getElementById('buyList');
+                list.replaceChildren();
+                let lastGroup = null;
+                for (const r of items) {
+                    if (r.group !== lastGroup) {
+                        lastGroup = r.group;
+                        const h = document.createElement('div');
+                        h.textContent = r.group;
+                        h.style.cssText = 'margin:10px 0 4px; font-size:12px; color:#888; text-transform:uppercase; letter-spacing:.05em';
+                        list.appendChild(h);
+                    }
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex; gap:10px; align-items:baseline; font-size:13px; padding:3px 0; border-bottom:1px solid #1a1a22; flex-wrap:wrap';
+                    const name = document.createElement('span');
+                    name.textContent = `${r.artist} - ${r.title}`;
+                    name.style.flex = '1 1 280px';
+                    const pl = document.createElement('span');
+                    pl.textContent = r.playlist; pl.style.cssText = 'color:#777; font-size:12px';
+                    row.append(name, pl);
+                    if (r.youtube_copy) {
+                        const yt = document.createElement('span');
+                        yt.textContent = r.youtube_copy; yt.title = 'A YouTube copy is in the playlist until a better one is found';
+                        yt.style.cssText = 'color:#e0a030; font-size:11px; border:1px solid #5a4a1a; border-radius:4px; padding:0 5px';
+                        row.append(yt);
+                    }
+                    for (const [label, url] of [['Bandcamp', r.bandcamp], ['Beatport', r.beatport]]) {
+                        const a = document.createElement('a');
+                        a.textContent = label; a.href = url; a.target = '_blank'; a.rel = 'noopener';
+                        a.style.cssText = 'color:#1db954; font-size:12px';
+                        row.append(a);
+                    }
+                    list.appendChild(row);
+                }
+                const fb = await (await fetch('/api/youtube-fallback')).json();
+                document.getElementById('ytFallbackBox').checked = !!fb.enabled;
+            } catch (e) { /* ignore */ }
+        }
+
+        async function setYoutubeFallback(on) {
+            await fetch('/api/youtube-fallback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                   body: JSON.stringify({ enabled: on }) });
+        }
+        loadToBuy();
 
         // Following other people's playlists
         async function loadFollowed() {

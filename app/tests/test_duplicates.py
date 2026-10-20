@@ -108,6 +108,11 @@ class HeldFileGuardTest(unittest.TestCase):
         self.assertEqual(sync_soulseek._held_files(state, ["id-mama", "id-done"]), {"id-mama": [self.held]},
                          "only a stand-in counts; a finished track needs no check")
 
+    def test_a_youtube_stand_in_is_not_held_because_the_real_copy_is_meant_to_replace_it(self):
+        state = {"p": {"variants": {"aiff": {"tracks": {
+            "id-mama": {"stand_in": True, "file_path": str(self.held), "source": {"how": "youtube"}}}}}}}
+        self.assertEqual(sync_soulseek._held_files(state, ["id-mama"]), {})
+
 
 class DuplicateReportTest(unittest.TestCase):
     def setUp(self):

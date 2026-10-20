@@ -325,6 +325,41 @@ async def stop_syncing_playlist(playlist_id: str):
     return {**result, "removed": True, "unfollowed": unfollowed}
 
 
+@app.get("/api/to-buy")
+async def to_buy_list():
+    """Tracks Soulseek could not supply (to buy on Bandcamp/Beatport), most certain first."""
+    from collections import Counter
+    from services import failure_log, to_buy
+    rows = to_buy.build_list(_get_orchestrator()._state, failure_log.all_failures())
+    return {"items": rows, "counts": dict(Counter(r["group"] for r in rows)),
+            "with_youtube_copy": sum(1 for r in rows if r["youtube_copy"])}
+
+
+@app.get("/api/to-buy.csv")
+async def to_buy_csv():
+    from fastapi.responses import Response
+    from services import failure_log, to_buy
+    text = to_buy.as_csv(to_buy.build_list(_get_orchestrator()._state, failure_log.all_failures()))
+    return Response(content="\ufeff" + text, media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=sff_to_buy.csv"})
+
+
+class YoutubeFallbackRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/youtube-fallback")
+async def get_youtube_fallback():
+    return {"enabled": app_config.get_youtube_fallback()}
+
+
+@app.post("/api/youtube-fallback")
+async def set_youtube_fallback(body: YoutubeFallbackRequest):
+    """Fill a track Soulseek cannot supply at all with a labelled YouTube copy (Soulseek syncs only)."""
+    app_config.set_youtube_fallback(body.enabled)
+    return {"enabled": app_config.get_youtube_fallback()}
+
+
 class FollowRequest(BaseModel):
     ref: str                     # a Spotify link, URI or id, or the exact name of a playlist in your library
     display_name: str = ""       # what to call it in Rekordbox (default: its Spotify name)

@@ -27,7 +27,7 @@ from pathlib import Path
 
 from services import app_config, audio_formats, audit_log, failure_log, soulseek, source_log, tagging, verify_audio
 from services.suggest import suggest_label
-from services.labels import norm_title, title_key
+from services.labels import norm_title, title_key, with_label
 from services import rekordbox as rb
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,8 @@ def _held_files(playlists_state: dict, ids) -> dict[str, list[Path]]:
     for pl in playlists_state.values():
         for v in (pl.get("variants") or {}).values():
             for sid, rec in (v.get("tracks") or {}).items():
-                if sid in wanted and rec.get("stand_in") and rec.get("file_path") and Path(rec["file_path"]).is_file():
+                if (sid in wanted and rec.get("stand_in") and rec.get("file_path") and Path(rec["file_path"]).is_file()
+                        and (rec.get("source") or {}).get("how") != "youtube"):    # a YouTube copy is meant to be replaced
                     out.setdefault(sid, []).append(Path(rec["file_path"]))
     return out
 
@@ -352,6 +353,41 @@ def _report_duplicates(progress, music_folder: str, playlists) -> None:
         logger.warning("Duplicate check skipped: %s", e)
 
 
+def _has_a_file(variants, sid: str, fmts) -> bool:
+    """Whether this track already has a file in the playlist (a different mix kept as a stand-in counts)."""
+    for fmt in fmts:
+        rec = (variants[fmt].state.get("tracks") or {}).get(sid)
+        if rec and rec.get("file_path") and Path(rec["file_path"]).is_file():
+            return True
+    return False
+
+
+def _youtube_fill_in(track, work_dir: Path, reference):
+    try:
+        from services import youtube_fill
+        return youtube_fill.fill_in(track, work_dir, reference)
+    except Exception as e:                       # a missing fill-in must never stop the sync
+        logger.warning("YouTube fill-in failed for %s - %s: %s", track.artist, track.title, e)
+        return None
+
+
+def _retire_youtube_copy(v, old: dict, new_path: str) -> None:
+    """A real copy has arrived for a track that had only a YouTube stand-in: take the stand-in out of the playlist and
+    put its file aside in _replaced (never deleted), pointing Rekordbox at it so nothing reads as missing."""
+    from services.audio_formats import unique_path
+    old_path = Path(old.get("file_path") or "")
+    if not old.get("file_path") or old_path.as_posix().lower() == new_path.lower():
+        return
+    rb.remove_track_from_playlist(v.display_name, old_path.name)
+    if old_path.is_file():
+        aside = old_path.parent / "_replaced"
+        aside.mkdir(exist_ok=True)
+        dest = unique_path(aside, old_path.stem, old_path.suffix.lstrip("."))
+        shutil.move(str(old_path), str(dest))
+        rb.update_content_path(old_path.as_posix(), dest.as_posix())
+        logger.info("replaced the YouTube copy %s (kept in _replaced)", old_path.name)
+
+
 def _sync_playlist(orch, spotify, pl: dict, formats: list[str], music_folder: str, nicotine_dir: str) -> None:
     progress = orch.progress
     pl_id, pl_name, base_name = pl["id"], pl["name"], pl["display_name"]
@@ -464,6 +500,14 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
                 progress.tracks_deferred += len(fmts)
                 logger.info("not searching again for %s: it failed recently", label)
                 continue
+            fill = None
+            if not src and app_config.get_youtube_fallback() and not _has_a_file(variants, sid, fmts):
+                progress.message = f"Nothing on Soulseek for {label}: trying YouTube"
+                fill = _youtube_fill_in(track, Path(nicotine_dir) / "_youtube", references.get(sid))
+                if fill:
+                    src = fill["path"]
+                    sources[sid] = {"user": "", "remote_path": fill["url"], "how": "youtube", "codec": fill["codec"],
+                                    "abr": fill["abr"], "label": fill["label"], "video_title": fill["video_title"]}
             if not src:
                 progress.tracks_failed += len(fmts)
                 progress.errors.append(f"Soulseek: no source found for {label} -- {st.why_no_source() if st else 'never searched'}")
@@ -475,7 +519,9 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
                 continue
             progress.tracks_downloaded += 1
             user, remote = st.key if st and st.key else (None, None)
-            if user:
+            if fill:
+                logger.info("filled %s from YouTube: %s [%s]", label, fill["video_title"], fill["label"])
+            elif user:
                 sources[sid] = {"user": user, "remote_path": remote, "how": "downloaded"}
                 logger.info("downloaded %s from %s: %s", label, user, remote)
             else:
@@ -504,6 +550,8 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
                     shutil.move(str(src), str(dest))
                 if not tagging.write_tags(dest, track, art, carry):
                     progress.errors.append(f"Could not write tags/cover for {label} (mp3); file kept as is")
+                elif sources.get(sid, {}).get("how") == "youtube":
+                    tagging.set_title(dest, with_label(track.title, sources[sid]["label"]))
             for fmt in fmts:
                 planned.append((sid, fmt, dest))
             logger.info("kept %s as a 320 kbps MP3 (the lossless fallback): %s", label, dest.name)
@@ -541,14 +589,16 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
     # Anything the checks could not settle by themselves is queued for the review page.
     queued = []
     for sid, fmt, path in planned:
-        if sid not in findings and sources.get(sid, {}).get("how") != "downloaded":
+        if sid not in findings and sources.get(sid, {}).get("how") not in ("downloaded", "youtube"):
             continue                                           # made from a file we already had: nothing new to judge
         track = track_by_id[sid]
         reasons, sim = [], (findings.get(sid) or {}).get("similarity")
         if sim is not None and sim < verify_audio.SAME_SONG_WARN_BELOW:
             reasons.append("different version?")
+        if sources.get(sid, {}).get("how") == "youtube":
+            reasons.append(f"YouTube fill-in ({sources[sid]['label']}): is it the right song?")
         version = suggest_label(path.stem, track.title)
-        if version:
+        if version and sources.get(sid, {}).get("how") != "youtube":
             reasons.append(f"different mix? (the file name says: {version})")
         if reasons:
             queued.append({"playlist": variants[fmt].display_name, "title": track.title, "verdict": " + ".join(reasons),
@@ -599,8 +649,15 @@ def _write_to_rekordbox(orch, planned, variants, tracks, sources) -> None:
             track = dataclasses.replace(
                 track_by_id[sid], file_extension=path.suffix.lstrip(".").lower() or audio_formats.FORMATS[fmt].ext,
                 playlist_name=v.display_name)
+            from_youtube = sources.get(sid, {}).get("how") == "youtube"
+            if from_youtube:
+                # shown in Rekordbox as what it really is, so it is known when it is played
+                shown = dataclasses.replace(track, title=with_label(track.title, sources[sid]["label"]))
+            else:
+                shown = track
             file_path = str(path).replace("\\", "/")
-            content_id = rb.import_track_unanalyzed(file_path, track).get("id")
+            old = v.state["tracks"].get(sid)
+            content_id = rb.import_track_unanalyzed(file_path, shown).get("id")
             if content_id and rb.add_track_to_playlist(pid, content_id, track.position + 1):
                 progress.tracks_imported += 1
                 v.state["tracks"][sid] = {
@@ -609,6 +666,11 @@ def _write_to_rekordbox(orch, planned, variants, tracks, sources) -> None:
                 }
                 if sid in sources:
                     v.state["tracks"][sid]["source"] = sources[sid]
+                if from_youtube:                      # a stand-in: every later sync keeps looking for the real thing
+                    v.state["tracks"][sid]["stand_in"] = True
+                    v.state["tracks"][sid]["stand_in_label"] = sources[sid]["label"]
+                elif old and old.get("stand_in") and (old.get("source") or {}).get("how") == "youtube":
+                    _retire_youtube_copy(v, old, file_path)   # the real one arrived: the YouTube stand-in goes
             else:
                 progress.tracks_failed += 1
                 progress.errors.append(f"Rekordbox import failed: {track.artist} - {track.title} ({fmt})")

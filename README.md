@@ -137,6 +137,25 @@ empty is filled from the other side, and where both sides hold different values 
 not available on the second computer (those reference files are not part of the copied library); the YouTube and Spotify
 references still are.
 
+### Tracks Soulseek can't supply: YouTube fill-ins and the shopping list
+
+With the Soulseek source, a track nothing could be found for (not even a 320 kbps MP3) can be **filled in from YouTube** so the
+playlist has no hole. Tick the box in the "Not on Soulseek: to buy" card on the main page (it is off by default). The copy is
+never passed off as the real thing:
+
+- Its Rekordbox title carries what YouTube really served, for example `Title [YT opus 135k]`. The MP3 itself says 320 kbps, but YouTube
+  never serves that: the stream is Opus or AAC at roughly 130-160 kbps and the MP3 is a re-encode of it (yt-dlp reports the real codec
+  and bitrate, so the label is exact, not a guess).
+- It is a stand-in: every later sync keeps looking on Soulseek, and when a lossless copy arrives it replaces the YouTube file (the
+  old file is kept in the playlist folder's `_replaced`, never deleted).
+- It is queued on the review page, so a wrong video can be caught by ear. Candidates are screened first (no live/cover/slowed/stem
+  versions, the song's own words must be in the title, the length must fit).
+- A track that already has a file in the playlist (even a different mix kept as a stand-in) is never filled in.
+
+The same card lists **every track Soulseek could not supply**, with its playlist, how sure we are (not on Soulseek after repeated runs /
+only bad copies / tried once or twice), whether a YouTube copy is standing in, and Bandcamp and Beatport search links, so you know what
+to buy. "Download as a spreadsheet" saves it as CSV.
+
 ---
 
 ## Common issues
