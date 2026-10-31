@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from models.track import TrackInfo
-from services import app_config
+from services import app_config, safe_io
 from services.platform_paths import (
     is_rekordbox_running as _platform_is_rekordbox_running,
 )
@@ -85,7 +85,7 @@ class SyncOrchestrator:
     def _save_state(self):
         """Save sync state to disk."""
         try:
-            STATE_FILE.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
+            safe_io.write_text_atomic(STATE_FILE, json.dumps(self._state, indent=2))
         except OSError as e:
             logger.error("Failed to save state: %s", e)
 

@@ -26,7 +26,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from services import app_config, audio_formats, audit_log, failure_log, soulseek, source_log, tagging, verify_audio
+from services import app_config, audio_formats, audit_log, failure_log, safe_io, soulseek, source_log, tagging, verify_audio
 from services.suggest import suggest_label
 from services.labels import norm_title, title_key, with_label
 from services import rekordbox as rb
@@ -650,6 +650,7 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
         art = tagging.fetch_artwork(track.artwork_url) or tagging.embedded_picture(src)
 
         first_dir = Path(music_folder) / variants[fmts[0]].display_name
+        safe_io.wait_for_space(music_folder, on_progress=lambda m: setattr(progress, "message", m))   # pause, don't fail, on a full disk
         outputs = audio_formats.build_outputs(
             src, fmts, lambda f: Path(music_folder) / variants[f].display_name,
             first_dir / "_originals", keep_source=keep_source)

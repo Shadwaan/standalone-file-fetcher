@@ -1513,6 +1513,7 @@ class QueuePatienceTest(SyncFixture):
         self.assertLessEqual(searches, 4, "1 initial + a few looks for a second source, not one every poll")
         self.assertEqual(st.attempts, 0, "waiting is not failing")
 
+    @mock.patch.object(soulseek, "MAX_PARALLEL_SOURCES", 2)   # sff runs one source at a time now; the mechanism stays covered
     def test_a_second_source_is_started_when_the_wait_drags_on_and_the_first_is_kept(self):
         self.nico.offer("Artist Q", "Track Q", "flac16", "stuckpeer", "a/01 - Track Q.flac", {"4": 44100, "5": 16}, free=True, speed=9000)
         self.nico.offer("Artist Q", "Track Q", "flac16", "quickpeer", "b/01 - Track Q.flac", {"4": 44100, "5": 16}, free=False, speed=10)

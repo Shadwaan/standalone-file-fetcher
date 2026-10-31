@@ -12,6 +12,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from services import safe_io
+
 logger = logging.getLogger(__name__)
 
 FILE = Path(__file__).resolve().parent.parent / "failed_tracks.json"
@@ -79,7 +81,7 @@ def record_youtube_miss(spotify_id: str) -> None:
         except (OSError, ValueError):
             data = {}
         data[spotify_id] = datetime.now().isoformat(timespec="seconds")
-        _misses_file().write_text(json.dumps(data, indent=1), encoding="utf-8")
+        safe_io.write_text_atomic(_misses_file(), json.dumps(data, indent=1))
     except OSError:
         pass
 
@@ -115,7 +117,7 @@ def record(failures: list[dict], resolved_ids=()) -> None:
                 **f, "first_failed": old.get("first_failed", now), "last_failed": now,
                 "times_failed": old.get("times_failed", 0) + 1,
             }
-        FILE.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+        safe_io.write_text_atomic(FILE, json.dumps(data, indent=1, ensure_ascii=False))
         rows = sorted(data.values(), key=lambda r: (r.get("category", ""), r.get("playlist", ""), r.get("artist", "")))
         with CSV_FILE.open("w", newline="", encoding="utf-8-sig") as fh:
             w = csv.writer(fh)

@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
-from services import audio_formats
+from services import audio_formats, safe_io
 from services.platform_paths import (
     DEFAULT_NICOTINE_EXE,
     NICOTINE_API_BASE_URL,
@@ -53,7 +53,7 @@ GIVE_UP_IF_NOTHING_AFTER = 4
 # download folder: harmless, since the track is already done.
 QUEUE_PATIENCE_SECONDS = 45 * 60
 PARALLEL_AFTER_SECONDS = 8 * 60
-MAX_PARALLEL_SOURCES = 2
+MAX_PARALLEL_SOURCES = 1                      # one source at a time: a second peer's copy arrives as "name (1).flac"
 EXTRA_SEARCH_EVERY_SECONDS = 10 * 60      # looking for a second source: at most this often per track
 # Waiting for a slot with a busy peer is not a failed attempt, but it must not last forever: one
 # track whose only sources sat with peers already holding stale requests of ours (Nicotine+ can't
@@ -181,7 +181,13 @@ def _api_post(path: str, payload: dict) -> dict:
 def _fetch_all_results(token: int, max_offset: int = 4000) -> list[dict]:
     items, offset, total = [], 0, None
     while True:
-        page = _api_get(f"/search/results?token={token}&limit=1000&offset={offset}")
+        try:
+            page = _api_get(f"/search/results?token={token}&limit=1000&offset={offset}")
+        except urllib.error.HTTPError as e:
+            if e.code != 400:
+                raise
+            logger.warning("search %s is gone (Nicotine+ restarted?): counting it as no results", token)
+            break                                            # an unknown token: don't abort the whole sync over it
         page_items = page.get("items", [])
         total = page.get("total", len(page_items))
         items.extend(page_items)
@@ -992,6 +998,8 @@ def search_and_queue_all(tracks: list, on_progress=None, local_dir: str | None =
             on_progress(f"Searching Soulseek ({start + len(chunk)}/{len(to_search)}): "
                         f"{chunk[0][0].artist} - {chunk[0][0].title} and {len(chunk) - 1} more")
         wait_until_connected(on_progress)
+        if local_dir:
+            safe_io.wait_for_space(local_dir, on_progress=on_progress)
         avoid = _avoided_peers()
         for (track, st), (best, stats) in zip(chunk, find_candidates(
                 [SearchJob(t.artist, t.title, "lossless", set(), avoid) for t, _ in chunk])):
@@ -1135,6 +1143,8 @@ def resolve_all(states: dict[str, _TrackState], on_progress=None, max_wall_secon
             searches.append((st, False))
 
         if searches:
+            if download_dir:
+                safe_io.wait_for_space(download_dir, on_progress=on_progress)
             if on_progress:
                 on_progress(f"Finding new sources for {len(searches)} tracks")
             avoid = _avoided_peers()
