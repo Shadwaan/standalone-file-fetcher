@@ -680,6 +680,42 @@ def _register_playlist_in_xml(playlist_id: str):
         logger.error("Failed to register playlist in masterPlaylists6.xml: %s", e)
 
 
+def delete_playlist(playlist_name: str) -> int | None:
+    """Delete a Rekordbox playlist and its entries. The tracks stay in the library and no file is touched.
+    Returns how many entries it held, or None when there is no such playlist (or it failed)."""
+    try:
+        import os
+        import xml.etree.ElementTree as ET
+        from pyrekordbox import Rekordbox6Database
+        from pyrekordbox.db6 import tables
+
+        db = Rekordbox6Database()
+        playlist = next((pl for pl in db.session.query(tables.DjmdPlaylist).all() if pl.Name == playlist_name), None)
+        if not playlist:
+            return None
+        pid = str(playlist.ID)
+        entries = db.session.query(tables.DjmdSongPlaylist).filter_by(PlaylistID=pid).all()
+        n = len(entries)
+        for e in entries:
+            db.session.delete(e)
+        db.session.delete(playlist)
+        db.session.commit()
+        if os.path.exists(REKORDBOX_PLAYLISTS_XML):
+            id_hex = hex(int(pid))[2:].upper()
+            tree = ET.parse(REKORDBOX_PLAYLISTS_XML)
+            node = tree.getroot().find("PLAYLISTS")
+            if node is not None:
+                for child in node.findall("NODE"):
+                    if child.get("Id") == id_hex:
+                        node.remove(child)
+                tree.write(REKORDBOX_PLAYLISTS_XML, encoding="UTF-8", xml_declaration=True)
+        logger.info("Deleted Rekordbox playlist %s (%d entries)", playlist_name, n)
+        return n
+    except Exception as e:
+        logger.error("Failed to delete Rekordbox playlist '%s': %s", playlist_name, e)
+        return None
+
+
 def add_track_to_playlist(playlist_id: str, content_id: str, track_no: int) -> bool:
     """Add a track to a Rekordbox playlist at the given position."""
     try:

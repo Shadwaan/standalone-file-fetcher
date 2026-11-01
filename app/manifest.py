@@ -31,6 +31,7 @@ sys.path.insert(0, str(APP_DIR))
 
 logger = logging.getLogger("manifest")
 FORMAT_VERSION = 1
+HAND_MADE_PLAYLISTS = ["Beachbar Unc"]          # Rekordbox playlists you made by hand: carried as they are, sff keeps no records for them
 
 
 def _posix(path) -> str:
@@ -74,7 +75,20 @@ def build_manifest(state: dict, music_root: str, rb) -> dict:
                 })
             playlists.append({"name": v.get("display_name"), "format": fmt, "spotify_playlist_id": pl_id,
                               "spotify_name": pl.get("name", ""), "base_name": pl.get("display_name", ""), "tracks": tracks})
-    return {"format": FORMAT_VERSION, "exported_at": datetime.now().isoformat(timespec="seconds"),
+    hand_made = []
+    for name in HAND_MADE_PLAYLISTS:
+        rb_id = rb.find_playlist_id(name)
+        if not rb_id:
+            continue
+        tracks = []
+        for entry in rb.get_playlist_entries(rb_id):
+            rel = _relative(entry["path"], music_root)
+            if rel is None or "/_rejected/" in "/" + rel:
+                continue
+            tracks.append({"position": len(tracks) + 1, "title": entry["title"], "artist": entry["artist"],
+                           "album": entry["album"], "year": entry["year"], "comment": entry.get("comment", ""), "path": rel})
+        hand_made.append({"name": name, "tracks": tracks})
+    return {"format": FORMAT_VERSION, "hand_made_playlists": hand_made, "exported_at": datetime.now().isoformat(timespec="seconds"),
             "source_music_root": _posix(music_root), "playlists": playlists,
             "not_exported_outside_music_root": [{"playlist": a, "title": b, "path": c} for a, b, c in outside]}
 
@@ -106,7 +120,7 @@ def plan_import(manifest: dict, music_root: str) -> dict:
     """What an import would do, without doing it: the files found, and the ones that are not."""
     root = Path(music_root)
     found, missing = [], []
-    for pl in manifest["playlists"]:
+    for pl in manifest["playlists"] + manifest.get("hand_made_playlists", []):
         for t in pl["tracks"]:
             path = root / t["path"]
             (found if path.is_file() else missing).append((pl["name"], t, path))
@@ -175,6 +189,35 @@ def apply_import(manifest: dict, music_root: str, rb, state: dict, say=print) ->
                 if t.get("source"):
                     rec["source"] = t["source"]
                 variant["tracks"][t["spotify_id"]] = rec
+        done["playlists"] += 1
+    for pl in manifest.get("hand_made_playlists", []):
+        pid = rb.find_or_create_playlist(pl["name"])
+        if not pid:
+            say(f"  could not create the Rekordbox playlist {pl['name']!r}; skipped")
+            continue
+        say(f"{pl['name']} (made by hand): {len(pl['tracks'])} tracks")
+        have = {_posix(p).lower() for p in rb.get_playlist_track_paths(pid).values()}
+        n = len(have)
+        for t in pl["tracks"]:
+            path = root / t["path"]
+            if not path.is_file():
+                done["missing"] += 1
+                say(f"    MISSING, skipped: {t['path']}")
+                continue
+            if _posix(path).lower() in have:
+                continue
+            info = TrackInfo(spotify_id="", title=t["title"], artist=t["artist"], album=t.get("album") or "",
+                             year=str(t.get("year") or ""), duration_ms=_audio_length_ms(path), artwork_url=None,
+                             playlist_name=pl["name"], position=t["position"] - 1, file_extension=path.suffix.lstrip(".").lower())
+            content_id = rb.import_track_unanalyzed(_posix(path), info).get("id")
+            if not content_id or not rb.add_track_to_playlist(pid, content_id, n + 1):
+                done["missing"] += 1
+                say(f"    could not add to Rekordbox: {t['title']}")
+                continue
+            n += 1
+            done["tracks"] += 1
+            if t.get("comment") and hasattr(rb, "set_comment_by_path"):
+                rb.set_comment_by_path(_posix(path), t["comment"])
         done["playlists"] += 1
     return done
 

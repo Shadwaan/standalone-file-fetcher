@@ -40,6 +40,10 @@ class FakeRb:
         self.members.setdefault(pid, {})[cid] = no
         return True
 
+    def get_playlist_track_paths(self, pid):
+        ids = set(self.members.get(pid, {}))
+        return {c["title"]: path for path, c in self.contents.items() if c["id"] in ids}
+
     def flush_wal(self):
         self.flushed = True
 
@@ -95,6 +99,15 @@ class ManifestTest(unittest.TestCase):
         titles = [t["title"] for t in self.build()["playlists"][0]["tracks"]]
         self.assertNotIn("Wrong Song", titles)
         self.assertIn("A", titles)
+
+    def test_a_hand_made_playlist_travels_in_the_manifest(self):
+        self.rb.playlists["Beachbar Unc"] = [entry("Song", f"{self.root}/Dub AIFF/a.aiff"),
+                                              entry("Away", "D:/Music/Import/old.mp3")]
+        with mock.patch.object(manifest, "HAND_MADE_PLAYLISTS", ["Beachbar Unc", "Not There"]):
+            m = self.build()
+        self.assertEqual([p["name"] for p in m["hand_made_playlists"]], ["Beachbar Unc"])
+        self.assertEqual([t["path"] for t in m["hand_made_playlists"][0]["tracks"]], ["Dub AIFF/a.aiff"])
+        self.assertEqual([p["name"] for p in m["playlists"]], ["Dub AIFF"], "it is not mistaken for an sff playlist")
 
     def test_a_file_outside_the_music_folder_is_reported_not_silently_lost(self):
         m = self.build()
@@ -197,6 +210,17 @@ class ImportTest(unittest.TestCase):
             manifest.apply_import(self.manifest, str(self.mac_root), rb, state, say=lambda *_: None)
         self.assertEqual(len(rb.contents), 3)
         self.assertEqual(len(rb.members["id-1"]), 3)
+
+    def test_a_hand_made_playlist_is_built_once_and_needs_no_sff_records(self):
+        self.manifest["hand_made_playlists"] = [{"name": "Beachbar Unc", "tracks": [
+            {"position": 1, "title": "A", "artist": "X", "album": "", "year": "", "comment": "", "path": "Dub AIFF/a.aiff"},
+            {"position": 2, "title": "Not Copied Over", "artist": "X", "album": "", "year": "", "comment": "", "path": "Dub AIFF/gone.aiff"}]}]
+        self.assertEqual(len(manifest.plan_import(self.manifest, str(self.mac_root))["missing"]), 2)
+        rb, state = FakeRb(), {}
+        for _ in range(2):
+            manifest.apply_import(self.manifest, str(self.mac_root), rb, state, say=lambda *_: None)
+        self.assertEqual(len(rb.members[rb.ids["Beachbar Unc"]]), 1, "once, however often it runs")
+        self.assertEqual(list(state["playlists"]), ["SPOT1"], "no sff record is made for it")
 
     def run_cli(self, *extra, running=False):
         path = self.tmp / "m.json"
