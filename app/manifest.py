@@ -31,6 +31,7 @@ sys.path.insert(0, str(APP_DIR))
 
 logger = logging.getLogger("manifest")
 FORMAT_VERSION = 1
+RETIRED_PLAYLISTS = ["beachbar sets (classic) AIFF", "beachbar classics AIFF"]   # dropped on the PC; the import only reports them, it never deletes
 HAND_MADE_PLAYLISTS = ["Beachbar Unc"]          # Rekordbox playlists you made by hand: carried as they are, sff keeps no records for them
 
 
@@ -88,7 +89,7 @@ def build_manifest(state: dict, music_root: str, rb) -> dict:
             tracks.append({"position": len(tracks) + 1, "title": entry["title"], "artist": entry["artist"],
                            "album": entry["album"], "year": entry["year"], "comment": entry.get("comment", ""), "path": rel})
         hand_made.append({"name": name, "tracks": tracks})
-    return {"format": FORMAT_VERSION, "hand_made_playlists": hand_made, "exported_at": datetime.now().isoformat(timespec="seconds"),
+    return {"format": FORMAT_VERSION, "hand_made_playlists": hand_made, "retired_playlists": RETIRED_PLAYLISTS, "exported_at": datetime.now().isoformat(timespec="seconds"),
             "source_music_root": _posix(music_root), "playlists": playlists,
             "not_exported_outside_music_root": [{"playlist": a, "title": b, "path": c} for a, b, c in outside]}
 
@@ -255,6 +256,9 @@ def cmd_import(args) -> int:
           f"{len(plan['missing'])} missing.")
     for name, t, path in plan["missing"][:15]:
         print(f"  missing: {name} | {t['path']}")
+    if manifest.get("retired_playlists"):
+        print("Retired on the PC (delete them in Rekordbox if you have them; the music files can stay): "
+              + ", ".join(manifest["retired_playlists"]))
     from services import rekordbox as rb
     if not args.apply:
         _print_library_report(rb, plan["found"], before=True)
