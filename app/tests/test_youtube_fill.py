@@ -244,6 +244,25 @@ class YoutubeFillInTest(SyncFixture):
         self.run_sync()
         self.assertEqual(self.nico.searches, [], "a quick run leaves it alone")
 
+    def test_a_run_can_skip_old_failures_and_still_give_new_tracks_full_patience(self):
+        self.enable()
+        cfg = app_config.load(); cfg["failed_cooldown_hours"] = 24 * 30; cfg["quick_patience"] = False; app_config.save(cfg)
+        seen = []
+        real = soulseek.quick_limits
+        with mock.patch.object(soulseek, "quick_limits", side_effect=lambda: seen.append(1) or real()):
+            self.run_sync()
+        self.assertEqual(seen, [], "the short patience is off for this run")
+        self.assertTrue(app_config.get_quick_patience(), "and it switches itself back on afterwards")
+
+    def test_quick_runs_keep_the_short_patience_by_default(self):
+        self.enable()
+        cfg = app_config.load(); cfg["failed_cooldown_hours"] = 24 * 30; app_config.save(cfg)
+        seen = []
+        real = soulseek.quick_limits
+        with mock.patch.object(soulseek, "quick_limits", side_effect=lambda: seen.append(1) or real()):
+            self.run_sync()
+        self.assertEqual(seen, [1])
+
     def test_the_quick_limits_apply_only_inside_the_block(self):
         before = (soulseek.MAX_ATTEMPTS_PER_TRACK, soulseek.QUEUE_PATIENCE_SECONDS)
         with soulseek.quick_limits():

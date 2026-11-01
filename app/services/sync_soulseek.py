@@ -302,6 +302,8 @@ def run_soulseek_sync(orch, source=None) -> dict:
     for name, why in getattr(spotify, "skipped", []) or []:
         progress.errors.append(f"Could not read the followed playlist '{name}': {why}")
     progress.playlists_found = len(playlists)
+    if take_over_replaced_playlists(orch._state, playlists):
+        orch._save_state()
 
     skip = set(app_config.get_skip_playlists_once())
     try:
@@ -316,6 +318,7 @@ def run_soulseek_sync(orch, source=None) -> dict:
         if app_config.get_failed_cooldown_hours() or skip:      # these settings were for this one run only
             cfg = app_config.load()
             cfg["failed_cooldown_hours"] = None
+            cfg["quick_patience"] = True
             cfg["skip_playlists_once"] = []
             app_config.save(cfg)
             logger.info("the longer 'already checked' window and the skipped playlists were for this run only: back to normal")
@@ -331,6 +334,23 @@ def run_soulseek_sync(orch, source=None) -> dict:
     finally:
         orch._save_state()
     return orch.get_progress()
+
+
+def take_over_replaced_playlists(state: dict, playlists: list[dict]) -> list[str]:
+    """A followed playlist that replaces one of your own inherits its records (which tracks are downloaded, where the
+    files are, the Rekordbox playlist they sit in), so the swap re-downloads nothing and removes nothing. Only moves
+    when the replaced playlist has records and the new one has none yet. Returns the names of the playlists moved."""
+    moved = []
+    for pl in playlists:
+        old = pl.get("replaces")
+        if not old or old not in state["playlists"] or pl["id"] in state["playlists"]:
+            continue
+        entry = state["playlists"].pop(old)
+        entry["name"], entry["display_name"] = pl["name"], pl["display_name"]
+        state["playlists"][pl["id"]] = entry
+        logger.info("playlist %s now takes over the records of %s", pl["display_name"], old)
+        moved.append(pl["display_name"])
+    return moved
 
 
 def find_suffix_duplicates(folder: Path) -> list[tuple[Path, Path]]:
@@ -524,7 +544,7 @@ def _produce_files(orch, needed, track_by_id, variants, music_folder, nicotine_d
         validate_fn = _make_validator(references, findings,
                                       _rejected_files(track_by_id, [t.spotify_id for t in to_download]),
                                       _held_files(orch._state["playlists"], [t.spotify_id for t in to_download]))
-        with (soulseek.quick_limits() if quick else contextlib.nullcontext()):
+        with (soulseek.quick_limits() if quick and app_config.get_quick_patience() else contextlib.nullcontext()):
             soulseek.resolve_all(states, on_progress=_cb, download_dir=nicotine_dir, validate=validate_fn, on_notice=_notice)
 
     # 3. FILE WORK

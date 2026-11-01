@@ -31,6 +31,7 @@ _DEFAULTS = {
     "extra_playlists": [],         # other people's playlists to keep in sync: [{"id", "name", "display_name"}]
     "skip_playlists_once": [],     # playlist names (as shown in Rekordbox, without the format) left out of the NEXT sync only
     "failed_cooldown_hours": None, # for ONE run: treat tracks that failed within this many hours as already checked
+    "quick_patience": True,        # in that run: also use the short queue patience (False = full patience for new tracks)
     "youtube_fallback": False,     # Soulseek only: fill a track nothing else could supply with a labelled YouTube copy
 }
 
@@ -129,6 +130,11 @@ def get_failed_cooldown_hours() -> float | None:
     return float(value) if value else None
 
 
+def get_quick_patience() -> bool:
+    """In a run that skips recent failures: also use the short queue patience? Off gives new tracks a full search."""
+    return bool(load().get("quick_patience", True))
+
+
 def get_youtube_fallback() -> bool:
     return bool(load().get("youtube_fallback", False))
 
@@ -147,13 +153,22 @@ def get_extra_playlists() -> list[dict]:
     return [i for i in items if isinstance(i, dict) and i.get("id")]
 
 
-def add_extra_playlist(playlist_id: str, name: str, display_name: str = "") -> dict:
-    """Follow another playlist (by Spotify id). Adding the same id again just updates its names."""
+def get_replaced_playlist_ids() -> set:
+    """Ids of your own playlists that a followed playlist stands in for (see add_extra_playlist(replaces=...))."""
+    return {i["replaces"] for i in get_extra_playlists() if i.get("replaces")}
+
+
+def add_extra_playlist(playlist_id: str, name: str, display_name: str = "", replaces: str = "") -> dict:
+    """Follow another playlist (by Spotify id). Adding the same id again just updates its names.
+    `replaces` is the id of one of your own (FF) playlists that this one takes over from: it is no longer synced, and
+    its records move to the followed playlist so nothing is downloaded or removed twice."""
     if not playlist_id:
         raise ValueError("a playlist id is required")
     cfg = load()
     items = [i for i in (cfg.get("extra_playlists") or []) if i.get("id") != playlist_id]
     entry = {"id": playlist_id, "name": name, "display_name": (display_name or name).strip()}
+    if replaces:
+        entry["replaces"] = replaces
     items.append(entry)
     cfg["extra_playlists"] = items
     save(cfg)

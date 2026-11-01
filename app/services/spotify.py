@@ -171,9 +171,11 @@ class SpotifyService:
                 continue
             playlists.append({"id": info["id"], "name": info["name"],
                               "display_name": extra.get("display_name") or info["name"],
-                              "snapshot_id": info["snapshot_id"], "track_count": 0})
+                              "snapshot_id": info["snapshot_id"], "track_count": 0,
+                              "replaces": extra.get("replaces", "")})
             seen.add(info["id"])
-        return playlists
+        replaced = {p["replaces"] for p in playlists if p.get("replaces")}
+        return [p for p in playlists if p["id"] not in replaced]
 
     def get_playlist_tracks(self, playlist_id: str, playlist_name: str) -> list[TrackInfo]:
         """Get all tracks from a playlist with full metadata."""
