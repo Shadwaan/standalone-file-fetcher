@@ -32,6 +32,11 @@ sys.path.insert(0, str(APP_DIR))
 logger = logging.getLogger("manifest")
 FORMAT_VERSION = 1
 RETIRED_PLAYLISTS = ["beachbar sets (classic) AIFF", "beachbar classics AIFF"]   # dropped on the PC; the import only reports them, it never deletes
+REPLACED_FILES = [{                  # a wrong file swapped for the right one: the Mac must use "new" and may drop "old"
+    "playlist": "Opening AIFF",
+    "old": "Opening AIFF/112-dele_sosimi-you_no_fit_touch_am_(medlar_remix).aiff",
+    "new": "Opening AIFF/21 - Dele Sosimi - You No Fit Touch Am (Medlar Remix).aiff",
+    "why": "the old file was 6:49 and its tempo drifts (a cut, not the release). The new one is the real 9:30 Medlar Remix, made from a lossless FLAC."}]
 HAND_MADE_PLAYLISTS = ["Beachbar Unc"]          # Rekordbox playlists you made by hand: carried as they are, sff keeps no records for them
 
 
@@ -89,7 +94,7 @@ def build_manifest(state: dict, music_root: str, rb) -> dict:
             tracks.append({"position": len(tracks) + 1, "title": entry["title"], "artist": entry["artist"],
                            "album": entry["album"], "year": entry["year"], "comment": entry.get("comment", ""), "path": rel})
         hand_made.append({"name": name, "tracks": tracks})
-    return {"format": FORMAT_VERSION, "hand_made_playlists": hand_made, "retired_playlists": RETIRED_PLAYLISTS, "exported_at": datetime.now().isoformat(timespec="seconds"),
+    return {"format": FORMAT_VERSION, "hand_made_playlists": hand_made, "retired_playlists": RETIRED_PLAYLISTS, "replaced_files": REPLACED_FILES, "exported_at": datetime.now().isoformat(timespec="seconds"),
             "source_music_root": _posix(music_root), "playlists": playlists,
             "not_exported_outside_music_root": [{"playlist": a, "title": b, "path": c} for a, b, c in outside]}
 
@@ -256,6 +261,9 @@ def cmd_import(args) -> int:
           f"{len(plan['missing'])} missing.")
     for name, t, path in plan["missing"][:15]:
         print(f"  missing: {name} | {t['path']}")
+    for r in manifest.get("replaced_files", []):
+        print(f"Replaced on the PC ({r['playlist']}): use {r['new']} and delete {r['old']} from the Rekordbox playlist "
+              f"(the old file can be removed). Why: {r['why']}")
     if manifest.get("retired_playlists"):
         print("Retired on the PC (delete them in Rekordbox if you have them; the music files can stay): "
               + ", ".join(manifest["retired_playlists"]))

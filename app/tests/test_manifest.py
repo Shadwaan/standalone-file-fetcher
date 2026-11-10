@@ -109,6 +109,11 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual([t["path"] for t in m["hand_made_playlists"][0]["tracks"]], ["Dub AIFF/a.aiff"])
         self.assertEqual([p["name"] for p in m["playlists"]], ["Dub AIFF"], "it is not mistaken for an sff playlist")
 
+    def test_a_replaced_file_is_named_in_the_manifest(self):
+        m = self.build()
+        self.assertEqual(m["replaced_files"], manifest.REPLACED_FILES)
+        self.assertTrue(all({"playlist", "old", "new", "why"} <= set(r) for r in m["replaced_files"]))
+
     def test_a_file_outside_the_music_folder_is_reported_not_silently_lost(self):
         m = self.build()
         self.assertEqual([o["title"] for o in m["not_exported_outside_music_root"]], ["Old YouTube MP3"])
