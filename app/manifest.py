@@ -50,7 +50,7 @@ def _relative(path: str, root: str) -> str | None:
 
 
 # ----------------------------------------------------------------------------------------- export
-def build_manifest(state: dict, music_root: str, rb) -> dict:
+def build_manifest(state: dict, music_root: str, rb, rescue: dict | None = None) -> dict:
     """The manifest for every lossless playlist sff made. `rb` is the rekordbox service (or a stand-in)."""
     by_path = {}                                    # file path -> what the sync state knows about it
     for pl_id, pl in state.get("playlists", {}).items():
@@ -94,7 +94,25 @@ def build_manifest(state: dict, music_root: str, rb) -> dict:
             tracks.append({"position": len(tracks) + 1, "title": entry["title"], "artist": entry["artist"],
                            "album": entry["album"], "year": entry["year"], "comment": entry.get("comment", ""), "path": rel})
         hand_made.append({"name": name, "tracks": tracks})
-    return {"format": FORMAT_VERSION, "hand_made_playlists": hand_made, "retired_playlists": RETIRED_PLAYLISTS, "replaced_files": REPLACED_FILES, "exported_at": datetime.now().isoformat(timespec="seconds"),
+    quality = {}
+    if rescue:                                   # files saved off the old stick: one list each, with the quality in the Rekordbox comment
+        tag = {"lossless": "LOSSLESS", "lossy-ok": "SLIGHTLY LOSSY", "lossy-poor": "VERY LOSSY"}
+        by_path = {r["path"]: r for r in rescue["files"]}
+        for name, paths in sorted(rescue["lists"].items()):
+            tracks = []
+            for rel in paths:
+                r = by_path[rel]
+                note = f"[stick rescue] {tag[r['quality']]}: {r['quality_note']}"
+                if r["needs_lossless_search"]:
+                    note += " - replace when a lossless copy is found"
+                tracks.append({"position": len(tracks) + 1, "title": r["title"], "artist": r["artist"], "album": r["album"],
+                               "year": "", "comment": note, "path": rel, "quality": r["quality"]})
+            hand_made.append({"name": f"{name} [stick rescue]", "tracks": tracks})
+        quality = {"meaning": rescue.get("meaning", {}),
+                   "files": {r["path"]: {"quality": r["quality"], "note": r["quality_note"],
+                                         "needs_lossless_search": r["needs_lossless_search"],
+                                         "stick_playlists": r["stick_playlists"]} for r in rescue["files"]}}
+    return {"format": FORMAT_VERSION, "hand_made_playlists": hand_made, "pendrive_rescue_quality": quality, "retired_playlists": RETIRED_PLAYLISTS, "replaced_files": REPLACED_FILES, "exported_at": datetime.now().isoformat(timespec="seconds"),
             "source_music_root": _posix(music_root), "playlists": playlists,
             "not_exported_outside_music_root": [{"playlist": a, "title": b, "path": c} for a, b, c in outside]}
 
@@ -103,7 +121,9 @@ def cmd_export(args) -> int:
     from services import rekordbox as rb
     state_file = Path(args.state) if args.state else APP_DIR / "sync_state.json"
     state = json.loads(state_file.read_text(encoding="utf-8"))
-    manifest = build_manifest(state, args.music_root, rb)
+    rescue_file = APP_DIR.parent / "sound_list" / "pendrive_rescue.json"
+    rescue = json.loads(rescue_file.read_text(encoding="utf-8")) if rescue_file.exists() else None
+    manifest = build_manifest(state, args.music_root, rb, rescue)
     try:
         import review_sync
         manifest["review"] = review_sync.build_bundle(args.music_root)
@@ -264,6 +284,11 @@ def cmd_import(args) -> int:
     for r in manifest.get("replaced_files", []):
         print(f"Replaced on the PC ({r['playlist']}): use {r['new']} and delete {r['old']} from the Rekordbox playlist "
               f"(the old file can be removed). Why: {r['why']}")
+    q = (manifest.get("pendrive_rescue_quality") or {}).get("files") or {}
+    if q:
+        kinds = {k: sum(1 for v in q.values() if v["quality"] == k) for k in ("lossless", "lossy-ok", "lossy-poor")}
+        print(f"Stick rescue: {len(q)} files: {kinds['lossless']} lossless, {kinds['lossy-ok']} slightly lossy, "
+              f"{kinds['lossy-poor']} VERY lossy (placeholders until lossless copies are found). Each one's Rekordbox comment says which.")
     if manifest.get("retired_playlists"):
         print("Retired on the PC (delete them in Rekordbox if you have them; the music files can stay): "
               + ", ".join(manifest["retired_playlists"]))

@@ -109,6 +109,22 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual([t["path"] for t in m["hand_made_playlists"][0]["tracks"]], ["Dub AIFF/a.aiff"])
         self.assertEqual([p["name"] for p in m["playlists"]], ["Dub AIFF"], "it is not mistaken for an sff playlist")
 
+    def test_rescued_stick_files_become_lists_with_their_quality_in_the_comment(self):
+        rescue = {"meaning": {}, "files": [
+            {"path": "Pendrive Rescue/A/good.flac", "title": "Good", "artist": "X", "album": "", "quality": "lossless",
+             "quality_note": "LOSSLESS", "needs_lossless_search": False, "stick_playlists": ["Funk"], "proposed_lists": ["Coffee"]},
+            {"path": "Pendrive Rescue/A/bad.mp3", "title": "Bad", "artist": "Y", "album": "", "quality": "lossy-poor",
+             "quality_note": "VERY lossy", "needs_lossless_search": True, "stick_playlists": ["Funk"], "proposed_lists": ["Coffee"]}],
+            "lists": {"Coffee": ["Pendrive Rescue/A/good.flac", "Pendrive Rescue/A/bad.mp3"]}}
+        self.state["playlists"]["SPOT1"]["variants"]["aiff"]["rb_playlist_id"] = "pl-Dub AIFF"
+        m = manifest.build_manifest(self.state, self.root, self.rb, rescue)
+        lst = next(p for p in m["hand_made_playlists"] if p["name"] == "Coffee [stick rescue]")
+        self.assertEqual([t["title"] for t in lst["tracks"]], ["Good", "Bad"])
+        self.assertIn("LOSSLESS", lst["tracks"][0]["comment"])
+        self.assertIn("VERY LOSSY", lst["tracks"][1]["comment"])
+        self.assertIn("replace when a lossless copy is found", lst["tracks"][1]["comment"])
+        self.assertEqual(m["pendrive_rescue_quality"]["files"]["Pendrive Rescue/A/bad.mp3"]["needs_lossless_search"], True)
+
     def test_a_replaced_file_is_named_in_the_manifest(self):
         m = self.build()
         self.assertEqual(m["replaced_files"], manifest.REPLACED_FILES)
